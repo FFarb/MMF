@@ -1,11 +1,12 @@
 """
-Deep Quant Pipeline Orchestrator (Money Machine Edition).
+Deep Quant Pipeline Orchestrator (Bicameral Edition).
 
-This script is the single source of truth for the research stack:
+This script implements the Neuro-Symbolic "Bicameral" Trading System:
 1) Builds features with the Numba-accelerated physics engine.
 2) Screens features with the Alpha Council voting protocol.
-3) Trains the Mixture-of-Experts (Mixed Mode) ensemble.
-4) Prints diagnostic statistics including the system complexity score.
+3) Trains the Bicameral Hybrid Ensemble (Symbolic + Neural + Meta-Learner).
+4) Optimizes trading threshold using Sharpe Proxy metric.
+5) Prints comprehensive system diagnostics.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import classification_report
 
+from src.analysis.threshold_tuner import run_tuning
 from src.config import DAYS_BACK
 from src.features import build_feature_dataset
 from src.features.advanced_stats import apply_rolling_physics
@@ -46,7 +48,7 @@ def _build_labels(df: pd.DataFrame) -> pd.Series:
 
 def run_pipeline() -> None:
     print("=" * 72)
-    print("                     MONEY MACHINE: DEEP RESEARCH PIPELINE")
+    print("          NEURO-SYMBOLIC BICAMERAL TRADING SYSTEM")
     print("=" * 72)
 
     # ------------------------------------------------------------------ #
@@ -117,32 +119,56 @@ def run_pipeline() -> None:
     moe.fit(X_train, y_train)
 
     # ------------------------------------------------------------------ #
-    # 4. System Vital Signs
+    # 4. System Architecture Report
     # ------------------------------------------------------------------ #
-    print("\n[4] SYSTEM VITAL SIGNS")
+    print("\n[4] SYSTEM ARCHITECTURE")
+    print("    Visionary Architecture: 7-Scale Dynamic Convolution (Kernels: 3-129)")
+    print("    Analyst Architecture  : Gradient Boosting Decision Trees")
+    print("    Arbitration          : Meta-Learner (Volatility-Aware Stacking)")
+    
     complexity = moe.get_system_complexity()
-    print(f"    Gating Network Params : {complexity['Gating_Network_Params']:,}")
-    print(f"    Trend Expert Nodes    : {complexity['Trend_Expert_Nodes']:,}")
-    print(f"    Range Memory Units    : {complexity['Range_Expert_Memory']:,}")
-    print(f"    Stress Coefficients   : {complexity['Stress_Expert_Coefs']:,}")
-    print("-" * 60)
-    print(f"    TOTAL AI PARAMETERS   : {complexity['Total_System_Complexity']:,}")
+    print("\n    System Complexity:")
+    print(f"      Gating Network       : {complexity['Gating_Network_Params']:,} params")
+    print(f"      Bicameral Trend Expert: {complexity['Bicameral_Trend_Expert']:,} params")
+    print(f"      Range Expert (kNN)   : {complexity['Range_Expert_Memory']:,} samples")
+    print(f"      Stress Expert (LR)   : {complexity['Stress_Expert_Coefs']:,} coefs")
+    print("    " + "-" * 60)
+    print(f"      TOTAL PARAMETERS     : {complexity['Total_System_Complexity']:,}")
 
     # ------------------------------------------------------------------ #
-    # 5. Validation Snapshot
+    # 5. Validation & Threshold Optimization
     # ------------------------------------------------------------------ #
-    print("\n[5] VALIDATION SNAPSHOT")
+    print("\n[5] VALIDATION & THRESHOLD OPTIMIZATION")
     probs = moe.predict_proba(X_test)[:, 1]
     preds = (probs > 0.5).astype(int)
     report = classification_report(y_test, preds, digits=4)
     print(report)
     print("    Sample probabilities:", np.round(probs[:5], 4))
 
+    # Save validation predictions for threshold tuning
     artifacts = Path("artifacts")
     artifacts.mkdir(exist_ok=True)
-    summary_path = artifacts / "money_machine_snapshot.parquet"
-    pd.DataFrame({"probability": probs, "target": y_test}).to_parquet(summary_path)
-    print(f"    Stored validation snapshot at {summary_path}")
+    validation_path = artifacts / "validation_predictions.parquet"
+    pd.DataFrame({"probability": probs, "target": y_test.values}).to_parquet(validation_path)
+    print(f"\n    Saved validation predictions to: {validation_path}")
+    
+    # Run threshold optimization
+    print("\n    Running Sharpe Proxy threshold optimization...")
+    optimal_results = run_tuning(
+        validation_path=validation_path,
+        output_dir=artifacts,
+        avg_win_pct=0.02,
+        avg_loss_pct=-0.01,
+    )
+    
+    print("\n" + "=" * 72)
+    print("                         SYSTEM READY")
+    print("=" * 72)
+    print(f"  Optimal Trading Threshold: {optimal_results['optimal_threshold']:.2f}")
+    print(f"  Sharpe Proxy            : {optimal_results['optimal_sharpe_proxy']:.4f}")
+    print(f"  Expected Precision      : {optimal_results['precision']:.2%}")
+    print(f"  Expected Recall         : {optimal_results['recall']:.2%}")
+    print("=" * 72)
 
 
 if __name__ == "__main__":

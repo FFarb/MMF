@@ -1,11 +1,12 @@
 """
-Mixture-of-Experts ensemble that adapts routing based on market regimes.
+Bicameral Hybrid Ensemble: Neuro-Symbolic Trading System.
 
-Instead of relying on a single classifier, the model blends three specialists
-whose strengths align with different regimes: Trend, Range, and Stress. A
-lightweight gating network consumes chaos metrics (Hurst, Entropy, Volatility)
-and emits softmax weights that determine how much influence each expert has per
-observation.
+This module implements a two-system architecture that fuses:
+1. Symbolic Analyst (Gradient Boosting) - Logic, levels, support/resistance
+2. Topological Visionary (Deep Learning) - Patterns, shapes, multi-scale features
+
+A Meta-Learner (Stacking) arbitrates between these experts based on market entropy
+and volatility, learning when to trust each system.
 """
 from __future__ import annotations
 
@@ -17,9 +18,12 @@ import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.neural_network import MLPClassifier
+from sklearn.model_selection import KFold
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
+
+from .deep_experts import TorchSklearnWrapper
 
 
 def _as_dataframe(X: pd.DataFrame | np.ndarray | Sequence[Sequence[float]]) -> pd.DataFrame:
@@ -51,10 +55,245 @@ def _derive_regime_targets(physics_matrix: np.ndarray) -> np.ndarray:
     return labels
 
 
+def _compute_entropy(X: np.ndarray) -> float:
+    """Compute market entropy from feature matrix (simple proxy)."""
+    if X.shape[0] < 2:
+        return 0.5
+    # Use coefficient of variation as entropy proxy
+    std_vals = np.std(X, axis=0)
+    mean_vals = np.abs(np.mean(X, axis=0)) + 1e-8
+    cv = np.mean(std_vals / mean_vals)
+    return min(max(cv, 0.0), 1.0)
+
+
+def _compute_volatility(X: np.ndarray) -> float:
+    """Compute market volatility from feature matrix (simple proxy)."""
+    if X.shape[0] < 2:
+        return 0.01
+    # Use average standard deviation as volatility proxy
+    return float(np.mean(np.std(X, axis=0)))
+
+
+@dataclass
+class HybridTrendExpert(BaseEstimator, ClassifierMixin):
+    """
+    Bicameral Trend Expert: Fuses Symbolic Analyst and Topological Visionary.
+    
+    Architecture:
+    - Analyst: GradientBoostingClassifier (symbolic reasoning)
+    - Visionary: TorchSklearnWrapper(AdaptiveConvExpert) (neural pattern recognition)
+    - Meta-Learner: LogisticRegression (arbitrator)
+    
+    Training uses K-Fold stacking to generate unbiased meta-features.
+    
+    Parameters
+    ----------
+    n_estimators : int, optional
+        Number of boosting estimators for Analyst (default: 300).
+    learning_rate : float, optional
+        Learning rate for Analyst (default: 0.05).
+    max_depth : int, optional
+        Max depth for Analyst trees (default: 3).
+    random_state : int, optional
+        Random seed (default: 42).
+    """
+    
+    n_estimators: int = 300
+    learning_rate: float = 0.05
+    max_depth: int = 3
+    random_state: int = 42
+    
+    def __post_init__(self) -> None:
+        # Symbolic Analyst: Gradient Boosting
+        self.analyst = GradientBoostingClassifier(
+            n_estimators=self.n_estimators,
+            learning_rate=self.learning_rate,
+            max_depth=self.max_depth,
+            random_state=self.random_state,
+        )
+        
+        # Topological Visionary: Deep Learning (initialized in fit)
+        self.visionary = None
+        
+        # Meta-Learner: Arbitrator
+        self.meta_learner = LogisticRegression(
+            max_iter=1000,
+            solver='lbfgs',
+            random_state=self.random_state,
+        )
+        
+        self.scaler_ = StandardScaler()
+        self._fitted = False
+        self.classes_ = np.array([0, 1])
+        
+    def fit(
+        self,
+        X: pd.DataFrame | np.ndarray | Sequence[Sequence[float]],
+        y: Iterable[int | float],
+    ) -> "HybridTrendExpert":
+        """
+        Train the Bicameral Hybrid Expert using K-Fold stacking.
+        
+        Process:
+        1. 2-Fold cross-validation to generate unbiased meta-features
+        2. For each fold:
+           - Train Analyst and Visionary on Fold A
+           - Predict probabilities on Fold B
+        3. Build meta-features: [P_analyst, P_visionary, entropy, volatility]
+        4. Train meta-learner on meta-features
+        5. Retrain base models on full dataset
+        """
+        df = _as_dataframe(X)
+        numeric_df = df.select_dtypes(include=["number"])
+        
+        if numeric_df.empty:
+            raise ValueError("HybridTrendExpert requires numeric features.")
+        
+        X_array = numeric_df.to_numpy(dtype=float)
+        y_array = np.ravel(np.asarray(y))
+        
+        if X_array.shape[0] != y_array.shape[0]:
+            raise ValueError("Mismatched samples between X and y.")
+        
+        # Scale features
+        X_scaled = self.scaler_.fit_transform(X_array)
+        
+        # Initialize Visionary with correct feature count
+        n_features = X_scaled.shape[1]
+        self.visionary = TorchSklearnWrapper(
+            n_features=n_features,
+            hidden_dim=32,
+            sequence_length=16,
+            lstm_hidden=64,
+            dropout=0.2,
+            learning_rate=0.001,
+            batch_size=64,
+            max_epochs=100,
+            patience=10,
+            validation_split=0.15,
+            random_state=self.random_state,
+        )
+        
+        # K-Fold Stacking (k=2) to generate unbiased meta-features
+        print("    [Bicameral] Generating meta-features via 2-fold stacking...")
+        kfold = KFold(n_splits=2, shuffle=True, random_state=self.random_state)
+        
+        meta_features = np.zeros((X_scaled.shape[0], 4))  # [P_analyst, P_visionary, entropy, vol]
+        
+        for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(X_scaled)):
+            X_train_fold = X_scaled[train_idx]
+            y_train_fold = y_array[train_idx]
+            X_val_fold = X_scaled[val_idx]
+            
+            # Train Analyst on this fold
+            analyst_fold = GradientBoostingClassifier(
+                n_estimators=self.n_estimators,
+                learning_rate=self.learning_rate,
+                max_depth=self.max_depth,
+                random_state=self.random_state + fold_idx,
+            )
+            analyst_fold.fit(X_train_fold, y_train_fold)
+            
+            # Train Visionary on this fold
+            visionary_fold = TorchSklearnWrapper(
+                n_features=n_features,
+                hidden_dim=32,
+                sequence_length=16,
+                lstm_hidden=64,
+                dropout=0.2,
+                learning_rate=0.001,
+                batch_size=64,
+                max_epochs=100,
+                patience=10,
+                validation_split=0.15,
+                random_state=self.random_state + fold_idx,
+            )
+            visionary_fold.fit(X_train_fold, y_train_fold)
+            
+            # Predict on validation fold
+            p_analyst = analyst_fold.predict_proba(X_val_fold)[:, 1]
+            p_visionary = visionary_fold.predict_proba(X_val_fold)[:, 1]
+            
+            # Compute market conditions for validation fold
+            entropy_val = _compute_entropy(X_val_fold)
+            volatility_val = _compute_volatility(X_val_fold)
+            
+            # Store meta-features
+            meta_features[val_idx, 0] = p_analyst
+            meta_features[val_idx, 1] = p_visionary
+            meta_features[val_idx, 2] = entropy_val
+            meta_features[val_idx, 3] = volatility_val
+        
+        # Train meta-learner on meta-features
+        print("    [Bicameral] Training meta-learner arbitrator...")
+        self.meta_learner.fit(meta_features, y_array)
+        
+        # Retrain base models on full dataset
+        print("    [Bicameral] Retraining Analyst and Visionary on full dataset...")
+        self.analyst.fit(X_scaled, y_array)
+        self.visionary.fit(X_scaled, y_array)
+        
+        self._fitted = True
+        return self
+    
+    def _check_is_fitted(self) -> None:
+        if not self._fitted:
+            raise RuntimeError("HybridTrendExpert must be fitted before use.")
+    
+    def predict_proba(
+        self, X: pd.DataFrame | np.ndarray | Sequence[Sequence[float]]
+    ) -> np.ndarray:
+        """
+        Predict probabilities using meta-learner arbitration.
+        
+        Process:
+        1. Get probabilities from Analyst and Visionary
+        2. Compute/extract entropy and volatility
+        3. Build meta-features
+        4. Return meta-learner predictions
+        """
+        self._check_is_fitted()
+        
+        df = _as_dataframe(X)
+        numeric_df = df.select_dtypes(include=["number"])
+        X_array = numeric_df.to_numpy(dtype=float)
+        X_scaled = self.scaler_.transform(X_array)
+        
+        # Get base model probabilities
+        p_analyst = self.analyst.predict_proba(X_scaled)[:, 1]
+        p_visionary = self.visionary.predict_proba(X_scaled)[:, 1]
+        
+        # Compute market conditions
+        # Try to extract from input if available, otherwise compute
+        entropy_vals = np.full(X_scaled.shape[0], _compute_entropy(X_scaled))
+        volatility_vals = np.full(X_scaled.shape[0], _compute_volatility(X_scaled))
+        
+        # Build meta-features
+        meta_features = np.column_stack([
+            p_analyst,
+            p_visionary,
+            entropy_vals,
+            volatility_vals,
+        ])
+        
+        # Meta-learner arbitration
+        return self.meta_learner.predict_proba(meta_features)
+    
+    def predict(
+        self, X: pd.DataFrame | np.ndarray | Sequence[Sequence[float]]
+    ) -> np.ndarray:
+        """Predict class labels."""
+        probs = self.predict_proba(X)
+        return (probs[:, 1] > 0.5).astype(int)
+
+
 @dataclass
 class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
     """
     Adaptive ensemble that routes samples to experts based on chaos metrics.
+    
+    Now uses HybridTrendExpert (Bicameral) for trend detection, combining
+    symbolic and neural approaches with meta-learning arbitration.
 
     Parameters
     ----------
@@ -72,18 +311,23 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
     gating_epochs: int = 500
 
     def __post_init__(self) -> None:
-        self.trend_expert = GradientBoostingClassifier(
-            learning_rate=0.05,
+        # Bicameral Hybrid Trend Expert
+        self.trend_expert = HybridTrendExpert(
             n_estimators=self.trend_estimators,
+            learning_rate=0.05,
             max_depth=3,
             random_state=self.random_state,
         )
+        
+        # Fallback specialists
         self.range_expert = KNeighborsClassifier(n_neighbors=15, weights="distance")
         self.stress_expert = LogisticRegression(
             class_weight={0: 2.0, 1: 1.0},
             max_iter=500,
             solver="lbfgs",
         )
+        
+        # Gating network
         self.gating_network = MLPClassifier(
             hidden_layer_sizes=(8,),
             activation="tanh",
@@ -91,6 +335,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             max_iter=self.gating_epochs,
             random_state=self.random_state,
         )
+        
         self.feature_scaler = StandardScaler()
         self.physics_scaler = StandardScaler()
         self._fitted = False
@@ -119,11 +364,17 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             raise ValueError("Mismatched samples between X and y.")
 
         # Train specialists
+        print("    [MoE] Training Bicameral Hybrid Trend Expert...")
         self.trend_expert.fit(scaled_features, y_array)
+        
+        print("    [MoE] Training Range Expert (kNN)...")
         self.range_expert.fit(scaled_features, y_array)
+        
+        print("    [MoE] Training Stress Expert (Logistic)...")
         self.stress_expert.fit(scaled_features, y_array)
 
         # Train gating network on heuristic regimes
+        print("    [MoE] Training Gating Network...")
         physics_matrix = df.loc[:, physics_cols].to_numpy(dtype=float)
         scaled_physics = self.physics_scaler.fit_transform(physics_matrix)
         regime_labels = _derive_regime_targets(physics_matrix)
@@ -197,12 +448,19 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         for intercept in self.gating_network.intercepts_:
             mlp_params += intercept.size
 
-        # Trend expert complexity = total nodes across boosting ensemble
+        # Bicameral Trend Expert complexity
         trend_complexity = 0
-        if hasattr(self.trend_expert, "estimators_"):
-            for tree_set in self.trend_expert.estimators_:
+        
+        # Analyst (GradientBoosting) nodes
+        if hasattr(self.trend_expert.analyst, "estimators_"):
+            for tree_set in self.trend_expert.analyst.estimators_:
                 for tree in tree_set:
                     trend_complexity += getattr(tree.tree_, "node_count", 0)
+        
+        # Visionary (Deep Learning) parameters
+        if self.trend_expert.visionary is not None and self.trend_expert.visionary.model_ is not None:
+            for param in self.trend_expert.visionary.model_.parameters():
+                trend_complexity += param.numel()
 
         # Range expert stores training samples
         range_complexity = int(getattr(self.range_expert, "_fit_X", np.empty(0)).size)
@@ -216,11 +474,11 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         total = mlp_params + trend_complexity + range_complexity + stress_complexity
         return {
             "Gating_Network_Params": mlp_params,
-            "Trend_Expert_Nodes": trend_complexity,
+            "Bicameral_Trend_Expert": trend_complexity,
             "Range_Expert_Memory": range_complexity,
             "Stress_Expert_Coefs": stress_complexity,
             "Total_System_Complexity": total,
         }
 
 
-__all__ = ["MixtureOfExpertsEnsemble"]
+__all__ = ["MixtureOfExpertsEnsemble", "HybridTrendExpert"]
