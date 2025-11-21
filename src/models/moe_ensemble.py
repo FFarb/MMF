@@ -144,6 +144,14 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
         5. Retrain base models on full dataset
         """
         df = _as_dataframe(X)
+        
+        # Extract asset_id if present (for multi-asset support)
+        asset_ids = None
+        if 'asset_id' in df.columns:
+            asset_ids = df['asset_id'].values.astype(np.int64)
+            # Remove asset_id and symbol from features
+            df = df.drop(columns=['asset_id', 'symbol'], errors='ignore')
+        
         numeric_df = df.select_dtypes(include=["number"])
         
         if numeric_df.empty:
@@ -162,6 +170,8 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
         n_features = X_scaled.shape[1]
         self.visionary = TorchSklearnWrapper(
             n_features=n_features,
+            num_assets=11,  # Multi-asset support
+            embedding_dim=16,
             hidden_dim=32,
             sequence_length=16,
             lstm_hidden=64,
@@ -197,6 +207,8 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
             # Train Visionary on this fold
             visionary_fold = TorchSklearnWrapper(
                 n_features=n_features,
+                num_assets=11,
+                embedding_dim=16,
                 hidden_dim=32,
                 sequence_length=16,
                 lstm_hidden=64,
@@ -208,11 +220,14 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
                 validation_split=0.15,
                 random_state=self.random_state + fold_idx,
             )
-            visionary_fold.fit(X_train_fold, y_train_fold)
+            # Pass asset_ids for training fold
+            asset_train_fold = asset_ids[train_idx] if asset_ids is not None else None
+            asset_val_fold = asset_ids[val_idx] if asset_ids is not None else None
+            visionary_fold.fit(X_train_fold, y_train_fold, asset_ids=asset_train_fold)
             
             # Predict on validation fold
             p_analyst = analyst_fold.predict_proba(X_val_fold)[:, 1]
-            p_visionary = visionary_fold.predict_proba(X_val_fold)[:, 1]
+            p_visionary = visionary_fold.predict_proba(X_val_fold, asset_ids=asset_val_fold)[:, 1]
             
             # Compute market conditions for validation fold
             entropy_val = _compute_entropy(X_val_fold)
@@ -231,7 +246,7 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
         # Retrain base models on full dataset
         print("    [Bicameral] Retraining Analyst and Visionary on full dataset...")
         self.analyst.fit(X_scaled, y_array)
-        self.visionary.fit(X_scaled, y_array)
+        self.visionary.fit(X_scaled, y_array, asset_ids=asset_ids)
         
         self._fitted = True
         return self
@@ -255,13 +270,20 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
         self._check_is_fitted()
         
         df = _as_dataframe(X)
+        
+        # Extract asset_id if present
+        asset_ids = None
+        if 'asset_id' in df.columns:
+            asset_ids = df['asset_id'].values.astype(np.int64)
+            df = df.drop(columns=['asset_id', 'symbol'], errors='ignore')
+        
         numeric_df = df.select_dtypes(include=["number"])
         X_array = numeric_df.to_numpy(dtype=float)
         X_scaled = self.scaler_.transform(X_array)
         
         # Get base model probabilities
         p_analyst = self.analyst.predict_proba(X_scaled)[:, 1]
-        p_visionary = self.visionary.predict_proba(X_scaled)[:, 1]
+        p_visionary = self.visionary.predict_proba(X_scaled, asset_ids=asset_ids)[:, 1]
         
         # Compute market conditions
         # Try to extract from input if available, otherwise compute

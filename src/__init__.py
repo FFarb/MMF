@@ -6,7 +6,7 @@ High-level imports for the refactored package.
 """
 
 from .config import (
-    SYMBOL,
+    SYMBOLS,
     INTERVAL,
     DAYS_BACK,
     CACHE_DIR,
@@ -36,7 +36,7 @@ __all__ = [
     "filter_correlated_features",
     "SniperModelTrainer",
     "MetaModelTrainer",
-    "SYMBOL",
+    "SYMBOLS",
     "INTERVAL",
     "DAYS_BACK",
     "CACHE_DIR",

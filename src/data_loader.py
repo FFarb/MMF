@@ -21,8 +21,9 @@ from .config import (
     DAYS_BACK,
     INTERVAL,
     MAX_FETCH_BATCHES,
+    MULTI_ASSET_CACHE,
     PLOT_TEMPLATE,
-    SYMBOL,
+    SYMBOLS,
 )
 
 
@@ -33,7 +34,7 @@ class MarketDataLoader:
 
     def __init__(
         self,
-        symbol: str = SYMBOL,
+        symbol: str = SYMBOLS[0],
         interval: str = INTERVAL,
         cache_dir: Path | str = CACHE_DIR,
         max_batches: int = MAX_FETCH_BATCHES,
@@ -120,6 +121,85 @@ class MarketDataLoader:
         """Public wrapper around the internal fetcher."""
         return self._fetch_data(int(start_date.timestamp() * 1000), int(end_date.timestamp() * 1000))
 
+    def fetch_all_assets(
+        self,
+        days_back: int = DAYS_BACK,
+        force_refresh: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Fetch and combine data for all configured assets.
+        
+        This method loops through all symbols in config.SYMBOLS, fetches data for each,
+        adds asset_id and symbol columns, and concatenates into a single DataFrame.
+        
+        Parameters
+        ----------
+        days_back : int
+            Number of days of historical data to fetch for each asset.
+        force_refresh : bool
+            If True, bypass cache and fetch fresh data.
+            
+        Returns
+        -------
+        pd.DataFrame
+            Combined DataFrame with columns: [open, high, low, close, volume, asset_id, symbol]
+            Index: timestamp (datetime)
+        """
+        cache_path = self.cache_dir / MULTI_ASSET_CACHE
+        
+        # Check if multi-asset cache exists and is valid
+        if not force_refresh and cache_path.exists():
+            print(f"\n[MULTI-ASSET] Loading from cache: {cache_path}")
+            df_cached = pd.read_parquet(cache_path)
+            if "timestamp" in df_cached.columns:
+                df_cached["timestamp"] = pd.to_datetime(df_cached["timestamp"])
+                df_cached = df_cached.set_index("timestamp")
+            else:
+                df_cached.index = pd.to_datetime(df_cached.index)
+            print(f"[MULTI-ASSET] Loaded {len(df_cached)} rows for {df_cached['asset_id'].nunique()} assets")
+            return df_cached.sort_index()
+        
+        print(f"\n[MULTI-ASSET] Fetching data for {len(SYMBOLS)} assets...")
+        frames = []
+        
+        for asset_id, symbol in enumerate(SYMBOLS):
+            print(f"\n  [{asset_id + 1}/{len(SYMBOLS)}] Fetching {symbol}...")
+            loader = MarketDataLoader(
+                symbol=symbol,
+                interval=self.interval,
+                cache_dir=self.cache_dir,
+                max_batches=self.max_batches,
+                session=self.session,
+            )
+            
+            try:
+                df = loader.get_data(days_back=days_back, force_refresh=force_refresh)
+                if df.empty:
+                    print(f"      WARNING: No data retrieved for {symbol}, skipping...")
+                    continue
+                    
+                df["asset_id"] = asset_id
+                df["symbol"] = symbol
+                frames.append(df)
+                print(f"      ✓ Collected {len(df)} candles for {symbol}")
+            except Exception as exc:
+                print(f"      ERROR fetching {symbol}: {exc}")
+                continue
+        
+        if not frames:
+            raise ValueError("No data was successfully fetched for any asset!")
+        
+        # Combine all assets
+        df_all = pd.concat(frames, axis=0).sort_index()
+        
+        # Save to multi-asset cache
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        df_all.to_parquet(cache_path)
+        print(f"\n[MULTI-ASSET] Saved {len(df_all)} total rows to {cache_path}")
+        print(f"[MULTI-ASSET] Assets: {', '.join(df_all['symbol'].unique())}")
+        
+        return df_all
+
     def _load_cache(self) -> pd.DataFrame:
         df = pd.read_parquet(self.cache_file)
         if "timestamp" in df.columns:
@@ -192,7 +272,7 @@ class MarketDataLoader:
         return df
 
 
-def visualize_data(df: pd.DataFrame, symbol: str = SYMBOL) -> Path:
+def visualize_data(df: pd.DataFrame, symbol: str = SYMBOLS[0]) -> Path:
     """
     Create an interactive candlestick + volume chart and open it in a browser.
     """

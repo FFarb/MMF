@@ -47,6 +47,8 @@ class AdaptiveConvExpert(nn.Module):
     def __init__(
         self,
         n_features: int,
+        num_assets: int = 11,
+        embedding_dim: int = 16,
         hidden_dim: int = 32,
         sequence_length: int = 16,
         lstm_hidden: int = 64,
@@ -54,13 +56,19 @@ class AdaptiveConvExpert(nn.Module):
     ):
         super().__init__()
         self.n_features = n_features
+        self.num_assets = num_assets
+        self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.sequence_length = sequence_length
         self.lstm_hidden = lstm_hidden
+        self.dropout_rate = dropout
         
-        # Latent Projection: (Batch, N_Features) -> (Batch, Hidden_Dim * Seq_Len)
+        # Asset Embedding: Learn coin-specific patterns
+        self.asset_embedding = nn.Embedding(num_assets, embedding_dim)
+        
+        # Latent Projection: (Batch, N_Features + Embedding_Dim) -> (Batch, Hidden_Dim * Seq_Len)
         self.projection = nn.Sequential(
-            nn.Linear(n_features, hidden_dim * sequence_length),
+            nn.Linear(n_features + embedding_dim, hidden_dim * sequence_length),
             nn.BatchNorm1d(hidden_dim * sequence_length),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -78,6 +86,9 @@ class AdaptiveConvExpert(nn.Module):
             )
             for k in self.kernel_sizes
         ])
+        
+        # Sparse Activation: Dropout after each conv layer
+        self.conv_dropout = nn.Dropout(dropout)
         
         # Squeeze-and-Excitation Attention: Learn to weight each scale
         self.attention = nn.Sequential(
@@ -98,13 +109,16 @@ class AdaptiveConvExpert(nn.Module):
             dropout=0.0,  # Single layer, no dropout
         )
         
+        # LSTM Dropout for sparse activation
+        self.lstm_dropout = nn.Dropout(dropout)
+        
         # Classification Head
         self.head = nn.Sequential(
             nn.Linear(lstm_hidden, 1),
             nn.Sigmoid(),
         )
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, asset_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass through the Seven-Eye Visionary.
         
@@ -112,6 +126,9 @@ class AdaptiveConvExpert(nn.Module):
         ----------
         x : torch.Tensor
             Input features of shape (Batch, N_Features).
+        asset_ids : torch.Tensor, optional
+            Asset IDs of shape (Batch,) for embedding lookup.
+            If None, uses zeros (default to first asset).
             
         Returns
         -------
@@ -120,16 +137,25 @@ class AdaptiveConvExpert(nn.Module):
         """
         batch_size = x.size(0)
         
-        # 1. Latent Projection: (B, N_Features) -> (B, Hidden * Seq)
-        projected = self.projection(x)
+        # 0. Asset Embedding: Learn coin-specific features
+        if asset_ids is None:
+            asset_ids = torch.zeros(batch_size, dtype=torch.long, device=x.device)
+        asset_emb = self.asset_embedding(asset_ids)  # (B, Embedding_Dim)
+        
+        # Concatenate features with asset embedding
+        x_combined = torch.cat([x, asset_emb], dim=1)  # (B, N_Features + Embedding_Dim)
+        
+        # 1. Latent Projection: (B, N_Features + Embedding_Dim) -> (B, Hidden * Seq)
+        projected = self.projection(x_combined)
         
         # 2. Reshape to 3D: (B, Hidden * Seq) -> (B, Hidden, Seq)
         reshaped = projected.view(batch_size, self.hidden_dim, self.sequence_length)
         
-        # 3. Multi-Scale Convolution: Apply 7 parallel branches
+        # 3. Multi-Scale Convolution: Apply 7 parallel branches with sparse activation
         conv_outputs = []
         for conv_branch in self.conv_branches:
             conv_out = F.relu(conv_branch(reshaped))  # (B, Hidden, Seq)
+            conv_out = self.conv_dropout(conv_out)  # Sparse activation
             conv_outputs.append(conv_out)
         
         # 4. Stack outputs: (B, 7*Hidden, Seq)
@@ -144,10 +170,11 @@ class AdaptiveConvExpert(nn.Module):
             weight = attention_weights[:, idx:idx+1, None]  # (B, 1, 1)
             fused += weight * conv_out
         
-        # 7. LSTM: Temporal integration
+        # 7. LSTM: Temporal integration with sparse activation
         # Transpose for LSTM: (B, Hidden, Seq) -> (B, Seq, Hidden)
         lstm_input = fused.transpose(1, 2)
         lstm_out, _ = self.lstm(lstm_input)  # (B, Seq, LSTM_Hidden)
+        lstm_out = self.lstm_dropout(lstm_out)  # Sparse activation
         
         # 8. Take last timestep
         last_hidden = lstm_out[:, -1, :]  # (B, LSTM_Hidden)
@@ -156,6 +183,49 @@ class AdaptiveConvExpert(nn.Module):
         output = self.head(last_hidden)  # (B, 1)
         
         return output
+    
+    def predict_with_uncertainty(
+        self,
+        x: torch.Tensor,
+        asset_ids: Optional[torch.Tensor] = None,
+        n_iter: int = 10,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Monte Carlo inference for uncertainty quantification.
+        
+        Runs forward pass multiple times with dropout enabled to estimate
+        prediction uncertainty via variance across iterations.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input features of shape (Batch, N_Features).
+        asset_ids : torch.Tensor, optional
+            Asset IDs of shape (Batch,).
+        n_iter : int, optional
+            Number of Monte Carlo iterations (default: 10).
+            
+        Returns
+        -------
+        mean_probs : torch.Tensor
+            Mean predicted probabilities of shape (Batch, 1).
+        uncertainties : torch.Tensor
+            Standard deviation of predictions of shape (Batch, 1).
+        """
+        self.train()  # Enable dropout
+        predictions = []
+        
+        with torch.no_grad():
+            for _ in range(n_iter):
+                pred = self.forward(x, asset_ids)
+                predictions.append(pred)
+        
+        predictions = torch.stack(predictions, dim=0)  # (n_iter, Batch, 1)
+        mean_probs = predictions.mean(dim=0)  # (Batch, 1)
+        uncertainties = predictions.std(dim=0)  # (Batch, 1)
+        
+        self.eval()  # Restore eval mode
+        return mean_probs, uncertainties
 
 
 class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
@@ -194,6 +264,8 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
     def __init__(
         self,
         n_features: int,
+        num_assets: int = 11,
+        embedding_dim: int = 16,
         hidden_dim: int = 32,
         sequence_length: int = 16,
         lstm_hidden: int = 64,
@@ -206,6 +278,8 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         random_state: int = 42,
     ):
         self.n_features = n_features
+        self.num_assets = num_assets
+        self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.sequence_length = sequence_length
         self.lstm_hidden = lstm_hidden
@@ -228,13 +302,15 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         """Initialize the neural network model."""
         self.model_ = AdaptiveConvExpert(
             n_features=self.n_features,
+            num_assets=self.num_assets,
+            embedding_dim=self.embedding_dim,
             hidden_dim=self.hidden_dim,
             sequence_length=self.sequence_length,
             lstm_hidden=self.lstm_hidden,
             dropout=self.dropout,
         ).to(self.device)
         
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "TorchSklearnWrapper":
+    def fit(self, X: np.ndarray, y: np.ndarray, asset_ids: Optional[np.ndarray] = None) -> "TorchSklearnWrapper":
         """
         Train the neural network with early stopping.
         
@@ -253,9 +329,13 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         # Initialize model
         self._initialize_model()
         
+        # Handle asset_ids
+        if asset_ids is None:
+            asset_ids = np.zeros(len(X), dtype=np.int64)
+        
         # Train/validation split
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y,
+        X_train, X_val, y_train, y_val, asset_train, asset_val = train_test_split(
+            X, y, asset_ids,
             test_size=self.validation_split,
             random_state=self.random_state,
             stratify=y,
@@ -264,8 +344,10 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         # Convert to tensors
         X_train_t = torch.FloatTensor(X_train).to(self.device)
         y_train_t = torch.FloatTensor(y_train).unsqueeze(1).to(self.device)
+        asset_train_t = torch.LongTensor(asset_train).to(self.device)
         X_val_t = torch.FloatTensor(X_val).to(self.device)
         y_val_t = torch.FloatTensor(y_val).unsqueeze(1).to(self.device)
+        asset_val_t = torch.LongTensor(asset_val).to(self.device)
         
         # Optimizer and loss
         optimizer = torch.optim.Adam(self.model_.parameters(), lr=self.learning_rate)
@@ -291,10 +373,11 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
                 
                 X_batch = X_train_t[batch_indices]
                 y_batch = y_train_t[batch_indices]
+                asset_batch = asset_train_t[batch_indices]
                 
                 # Forward pass
                 optimizer.zero_grad()
-                outputs = self.model_(X_batch)
+                outputs = self.model_(X_batch, asset_batch)
                 loss = criterion(outputs, y_batch)
                 
                 # Backward pass
@@ -309,7 +392,7 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
             # Validation
             self.model_.eval()
             with torch.no_grad():
-                val_outputs = self.model_(X_val_t)
+                val_outputs = self.model_(X_val_t, asset_val_t)
                 val_loss = criterion(val_outputs, y_val_t).item()
             
             # Early stopping
@@ -328,7 +411,7 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         
         return self
     
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+    def predict_proba(self, X: np.ndarray, asset_ids: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Predict class probabilities.
         
@@ -336,6 +419,8 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         ----------
         X : np.ndarray
             Features of shape (n_samples, n_features).
+        asset_ids : np.ndarray, optional
+            Asset IDs of shape (n_samples,).
             
         Returns
         -------
@@ -345,10 +430,15 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         if self.model_ is None:
             raise RuntimeError("Model must be fitted before predict_proba.")
         
+        # Handle asset_ids
+        if asset_ids is None:
+            asset_ids = np.zeros(len(X), dtype=np.int64)
+        
         self.model_.eval()
         with torch.no_grad():
             X_t = torch.FloatTensor(X).to(self.device)
-            probs_class_1 = self.model_(X_t).cpu().numpy()
+            asset_t = torch.LongTensor(asset_ids).to(self.device)
+            probs_class_1 = self.model_(X_t, asset_t).cpu().numpy()
         
         # Return probabilities for both classes
         probs_class_0 = 1.0 - probs_class_1
