@@ -18,14 +18,17 @@ if errorlevel 1 (
 git add .
 
 :: Prompt for commit message
-set /p COMMIT_MSG="Enter commit message (or leave empty to skip commit): "
+set /p COMMIT_MSG="Enter commit message (or press Enter for default): "
 if "!COMMIT_MSG!"=="" (
-    echo No commit message provided. Skipping commit.
-) else (
-    git commit -m "!COMMIT_MSG!"
-    if errorlevel 1 (
-        echo Commit failed. Possibly no changes to commit.
-    )
+    :: Generate default commit message with timestamp
+    for /f "tokens=1-3 delims=/ " %%a in ('date /t') do set DATE=%%a-%%b-%%c
+    for /f "tokens=1-2 delims=: " %%a in ('time /t') do set TIME=%%a:%%b
+    set COMMIT_MSG=Auto-update: !DATE! !TIME!
+    echo Using default commit message: !COMMIT_MSG!
+)
+git commit -m "!COMMIT_MSG!"
+if errorlevel 1 (
+    echo Commit failed. Possibly no changes to commit.
 )
 
 :: Push changes

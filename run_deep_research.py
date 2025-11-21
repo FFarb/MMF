@@ -1,17 +1,16 @@
 """
-Deep Quant Pipeline Orchestrator (Smart Cache & Optimized Memory Edition).
-Multi-Asset Fix: Decoupled Feature Generation & Disk Offloading.
+Deep Quant Pipeline Orchestrator (Smart Horizon & Scout Assembly Edition).
+Fixes MemoryError by reducing M5 history and selecting features BEFORE global merge.
 """
 from __future__ import annotations
 
 import gc
 import shutil
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Sequence, Optional
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import classification_report
 
 # Import Config
 from src.config import DAYS_BACK, SYMBOLS, CACHE_DIR
@@ -30,10 +29,9 @@ LABEL_LOOKAHEAD = 36
 LABEL_THRESHOLD = 0.005
 TEMP_DIR = Path("temp_processed_assets")
 
-def _validate_physics_columns(df: pd.DataFrame, columns: Sequence[str]) -> None:
-    missing = [col for col in columns if col not in df.columns]
-    if missing:
-        pass 
+# --- Config Overrides for Memory Safety ---
+M5_LOOKBACK_DAYS = 180  # Limit high-freq data to last 6 months
+H1_LOOKBACK_DAYS = DAYS_BACK # Keep deep history for context
 
 def _build_labels(df: pd.DataFrame) -> pd.Series:
     if 'asset_id' in df.columns:
@@ -48,190 +46,212 @@ def cleanup_temp_dir():
         shutil.rmtree(TEMP_DIR)
     TEMP_DIR.mkdir(exist_ok=True)
 
-def get_smart_data(loader: MarketDataLoader, symbol: str, interval: str, days_back: int) -> pd.DataFrame:
-    """
-    Smart fetcher: Checks if data is up-to-date in cache before hitting API.
-    Leverages the MarketDataLoader's internal caching logic but ensures we don't
-    force re-download if we have the files.
-    """
-    # Set loader params
+def get_smart_data(loader: MarketDataLoader, symbol: str, interval: str, days: int) -> pd.DataFrame:
     loader.symbol = symbol
     loader.interval = interval
-    
-    # The loader.get_data() method already handles caching logic (checking parquet).
-    # We just need to ensure we don't force a refresh unless necessary.
-    # Assuming get_data(days_back=...) handles the 'update tail' logic internally.
     try:
-        df = loader.get_data(days_back=days_back)
+        df = loader.get_data(days_back=days)
         return df
     except Exception as e:
-        print(f"       [WARNING] Could not fetch data for {symbol} {interval}: {e}")
+        print(f"       [WARNING] Could not fetch {symbol} {interval}: {e}")
         return pd.DataFrame()
+
+def process_single_asset(symbol: str, asset_idx: int, loader: MarketDataLoader, factory: SignalFactory) -> Optional[pd.DataFrame]:
+    """
+    Loads, generates features, and merges M5/H1 data for a single asset.
+    """
+    try:
+        print(f"\n    >> Processing {symbol} (ID: {asset_idx})...")
+        
+        # A. Smart Horizon Loading
+        df_m5 = get_smart_data(loader, symbol, "5", M5_LOOKBACK_DAYS)
+        df_h1 = get_smart_data(loader, symbol, "60", H1_LOOKBACK_DAYS)
+        
+        if df_m5.empty or df_h1.empty:
+            return None
+
+        # B. Feature Generation
+        print(f"       Generating Strategic (H1) features...")
+        df_h1_features = factory.generate_signals(df_h1)
+        df_h1_features = df_h1_features.add_prefix("macro_")
+        
+        print(f"       Generating Execution (M5) features...")
+        df_m5_features = factory.generate_signals(df_m5)
+        
+        # C. Fractal Merge
+        df_m5_features = df_m5_features.sort_index()
+        df_h1_features = df_h1_features.sort_index()
+        
+        df_merged = pd.merge_asof(
+            df_m5_features,
+            df_h1_features,
+            left_index=True,
+            right_index=True,
+            direction='backward'
+        )
+        
+        # D. Physics
+        print(f"       Applying Chaos Physics...")
+        df_merged = apply_rolling_physics(df_merged, windows=[100, 200])
+        df_merged['asset_id'] = asset_idx
+        
+        # E. Optimization
+        df_merged = df_merged.replace([np.inf, -np.inf], np.nan).dropna()
+        
+        # Enforce float32
+        cols = df_merged.select_dtypes(include=['float64']).columns
+        df_merged[cols] = df_merged[cols].astype('float32')
+        
+        return df_merged
+        
+    except Exception as e:
+        print(f"       [ERROR] {symbol}: {e}")
+        return None
 
 def run_pipeline() -> None:
     print("=" * 72)
     print("          MULTI-ASSET NEURO-SYMBOLIC TRADING SYSTEM")
-    print("          (Smart Cache & Disk-Optimized Mode)")
+    print("          (Smart Horizon & Scout Assembly Mode)")
     print("=" * 72)
 
-    # ------------------------------------------------------------------ #
-    # 1. Multi-Asset Data & Feature Factory (Iterative Disk Offload)
-    # ------------------------------------------------------------------ #
-    print("\n[1] DATA & FEATURE FACTORY")
-    
     cleanup_temp_dir()
-    
     loader = MarketDataLoader(interval="5")
     factory = SignalFactory()
     
-    print(f"    Processing {len(ASSET_LIST)} assets: {ASSET_LIST}")
-    
     generated_files = []
+    scout_features: List[str] = []
     
-    for asset_idx, symbol in enumerate(ASSET_LIST):
-        try:
-            print(f"\n    >> Processing {symbol} (ID: {asset_idx})...")
-            
-            # --- A. Smart Fetch ---
-            # 1. M5 Data
-            df_m5 = get_smart_data(loader, symbol, "5", DAYS_BACK)
-            if df_m5.empty: continue
-
-            # 2. H1 Data
-            df_h1 = get_smart_data(loader, symbol, "60", DAYS_BACK)
-            if df_h1.empty: continue
-            
-            # --- B. Decoupled Feature Generation ---
-            
-            # 1. Generate Strategic Features (H1)
-            print(f"       Generating Strategic (H1) features...")
-            df_h1_features = factory.generate_signals(df_h1)
-            df_h1_features = df_h1_features.add_prefix("macro_")
-            
-            # 2. Generate Execution Features (M5) - ON RAW DATA
-            print(f"       Generating Execution (M5) features...")
-            df_m5_features = factory.generate_signals(df_m5)
-            
-            # --- C. Fractal Merge ---
-            print(f"       Merging Contexts...")
-            df_m5_features = df_m5_features.sort_index()
-            df_h1_features = df_h1_features.sort_index()
-            
-            df_merged = pd.merge_asof(
-                df_m5_features,
-                df_h1_features,
-                left_index=True,
-                right_index=True,
-                direction='backward'
-            )
-            
-            # --- D. Physics & Metadata ---
-            print(f"       Applying Chaos Physics...")
-            df_merged = apply_rolling_physics(df_merged, windows=[100, 200])
-            df_merged['asset_id'] = asset_idx
-            
-            # --- E. Optimization ---
-            df_merged = df_merged.replace([np.inf, -np.inf], np.nan).dropna()
-            cols = df_merged.select_dtypes('float64').columns
-            df_merged[cols] = df_merged[cols].astype('float32')
-            
-            # --- F. Offload ---
-            save_path = TEMP_DIR / f"{symbol}.parquet"
-            df_merged.to_parquet(save_path, compression='snappy')
-            generated_files.append(save_path)
-            print(f"       -> Saved: {save_path} | Shape: {df_merged.shape}")
-            
-            # --- G. Cleanup ---
-            del df_m5, df_h1, df_h1_features, df_m5_features, df_merged
-            gc.collect()
-            
-        except Exception as e:
-            print(f"       [ERROR] Failed {symbol}: {e}")
-            continue
+    # ------------------------------------------------------------------ #
+    # 1. SCOUT PHASE (First Asset Only)
+    # ------------------------------------------------------------------ #
+    print("\n[1] SCOUT PHASE (Feature Selection on Leader)")
+    scout_symbol = ASSET_LIST[0]
+    df_scout = process_single_asset(scout_symbol, 0, loader, factory)
     
-    if not generated_files:
-        print("CRITICAL: No data generated.")
+    if df_scout is None:
+        print("CRITICAL: Scout failed. Exiting.")
         return
-    
-    # ------------------------------------------------------------------ #
-    # 2. Global Assembly
-    # ------------------------------------------------------------------ #
-    print("\n[2] GLOBAL TENSOR ASSEMBLY")
-    try:
-        df = pd.concat([pd.read_parquet(f) for f in generated_files]).sort_index()
-        print(f"    Global Dataset Shape: {df.shape}")
-    except MemoryError:
-        print("    [CRITICAL] Memory Full. Switching to Sub-sampling Mode.")
-        dfs = []
-        for f in generated_files:
-            d = pd.read_parquet(f)
-            dfs.append(d.iloc[-int(len(d)*0.5):]) # Take last 50%
-        df = pd.concat(dfs).sort_index()
-        print(f"    Sampled Shape: {df.shape}")
 
-    # ------------------------------------------------------------------ #
-    # 3. Alpha Council
-    # ------------------------------------------------------------------ #
-    print("\n[3] ALPHA COUNCIL")
-    raw_labels = _build_labels(df)
-    valid_mask = ~raw_labels.isna()
-    df_clean = df.loc[valid_mask]
-    y_clean = raw_labels.loc[valid_mask]
+    # Run Alpha Council on Scout
+    print(f"    Running Alpha Council on Scout ({scout_symbol})...")
+    y_scout = _build_labels(df_scout)
+    valid_mask = ~y_scout.isna()
     
-    if len(df_clean) > 200000:
-        print(f"    Downsampling for Feature Selection...")
-        df_council = df_clean.iloc[-100000:]
-        y_council = y_clean.iloc[-100000:]
-    else:
-        df_council, y_council = df_clean, y_clean
-
-    exclude_cols = {"open", "high", "low", "close", "volume", "timestamp", "target", "asset_id", *PHYSICS_COLUMNS}
-    candidates = [col for col in df_clean.columns if col not in exclude_cols]
+    # Filter for Council
+    df_council = df_scout.loc[valid_mask].copy()
+    y_council = y_scout.loc[valid_mask]
+    
+    exclude = {"open", "high", "low", "close", "volume", "timestamp", "target", "asset_id", *PHYSICS_COLUMNS}
+    candidates = [c for c in df_council.columns if c not in exclude]
     
     council = AlphaCouncil()
-    survivors = council.screen_features(df_council[candidates], y_council)
-    print(f"    Selected {len(survivors)} features.")
-
-    available_physics = [c for c in PHYSICS_COLUMNS if c in df_clean.columns]
-    final_features = survivors + available_physics + ['asset_id']
+    selected_alphas = council.screen_features(df_council[candidates], y_council, n_features=25)
     
-    X = df_clean[final_features]
-    y = y_clean
-
-    del df, df_clean, df_council, y_clean
+    # Define Final Schema
+    available_physics = [c for c in PHYSICS_COLUMNS if c in df_scout.columns]
+    final_schema = selected_alphas + available_physics + ['asset_id', 'close']
+    scout_features = final_schema
+    
+    print(f"    SCOUT SELECTED {len(selected_alphas)} FEATURES: {selected_alphas}")
+    
+    # Save Scout to Disk (using only filtered schema to save space)
+    save_path = TEMP_DIR / f"{scout_symbol}.parquet"
+    df_scout[final_schema].to_parquet(save_path, compression='snappy')
+    generated_files.append(save_path)
+    
+    del df_scout, df_council, y_council
     gc.collect()
 
     # ------------------------------------------------------------------ #
-    # 4. Training
+    # 2. FLEET PHASE (Process remaining assets using Scout Schema)
+    # ------------------------------------------------------------------ #
+    print("\n[2] FLEET PHASE (Processing Remaining Assets)")
+    
+    for asset_idx, symbol in enumerate(ASSET_LIST[1:], start=1):
+        df_asset = process_single_asset(symbol, asset_idx, loader, factory)
+        
+        if df_asset is not None:
+            # Filter columns IMMEDIATELY before saving
+            # This ensures the disk files are small and compatible
+            try:
+                # Ensure all columns exist (fill 0 if missing, though unlikely if logic is same)
+                for col in scout_features:
+                    if col not in df_asset.columns:
+                        df_asset[col] = 0.0
+                
+                df_filtered = df_asset[scout_features]
+                
+                save_path = TEMP_DIR / f"{symbol}.parquet"
+                df_filtered.to_parquet(save_path, compression='snappy')
+                generated_files.append(save_path)
+                print(f"       -> Saved filtered shard: {save_path}")
+                
+            except Exception as e:
+                print(f"       [ERROR] Saving shard {symbol}: {e}")
+        
+        del df_asset
+        gc.collect()
+
+    # ------------------------------------------------------------------ #
+    # 3. GLOBAL ASSEMBLY
+    # ------------------------------------------------------------------ #
+    print("\n[3] GLOBAL ASSEMBLY")
+    dfs = []
+    for f in generated_files:
+        try:
+            dfs.append(pd.read_parquet(f))
+        except Exception as e:
+            print(f"    [WARN] Corrupt shard {f}: {e}")
+
+    if not dfs:
+        return
+
+    df_global = pd.concat(dfs).sort_index()
+    print(f"    Global Tensor Assembled: {df_global.shape}")
+
+    # ------------------------------------------------------------------ #
+    # 4. TRAINING
     # ------------------------------------------------------------------ #
     print("\n[4] MIXED MODE TRAINING")
-    split_idx = int(len(X) * 0.8)
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+    
+    y_global = _build_labels(df_global)
+    valid = ~y_global.isna()
+    
+    # X is already filtered to (survivors + physics + asset_id)
+    X = df_global.loc[valid].drop(columns=['close'], errors='ignore')
+    y = y_global.loc[valid]
+    
+    split = int(len(X) * 0.8)
+    X_train, X_test = X.iloc[:split], X.iloc[split:]
+    y_train, y_test = y.iloc[:split], y.iloc[split:]
     
     scheduler = TrainingScheduler()
-    # Safe access to entropy/volatility
     e_col = "entropy_200" if "entropy_200" in X.columns else X.columns[0]
     v_col = "fdi_200" if "fdi_200" in X.columns else X.columns[0]
     
-    entropy_signal = float(X_train[e_col].iloc[-1000:].mean())
-    volatility_signal = float(X_train[v_col].iloc[-1000:].mean())
+    # Safe signal extraction
+    if len(X_train) > 1000:
+        e_sig = float(X_train[e_col].iloc[-1000:].mean())
+        v_sig = float(X_train[v_col].iloc[-1000:].mean())
+    else:
+        e_sig, v_sig = 0.5, 1.5
+        
+    depth = scheduler.suggest_training_depth(e_sig, v_sig)
+    print(f"    Training Config: {depth}")
     
-    depth = scheduler.suggest_training_depth(entropy_signal, max(volatility_signal, 1e-6))
-    print(f"    Config: {depth}")
-
     moe = MixtureOfExpertsEnsemble(
         physics_features=available_physics,
         random_state=42,
         trend_estimators=depth["n_estimators"],
         gating_epochs=depth["epochs"],
     )
+    
     moe.fit(X_train, y_train)
-
+    
     # ------------------------------------------------------------------ #
-    # 5. Validation
+    # 5. VALIDATION
     # ------------------------------------------------------------------ #
-    print("\n[5] VALIDATION")
+    print("\n[5] VALIDATION & SNAPSHOT")
     probs = moe.predict_proba(X_test)[:, 1]
     
     artifacts = Path("artifacts")
@@ -239,6 +259,7 @@ def run_pipeline() -> None:
     
     val_df = pd.DataFrame({"probability": probs, "target": y_test.values})
     val_df.to_parquet(artifacts / "money_machine_snapshot.parquet")
+    print(f"    Snapshot saved.")
     
     run_tuning()
     cleanup_temp_dir()
