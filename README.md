@@ -1,205 +1,93 @@
-<<<<<<< HEAD
-# Bybit Futures Data Fetcher & Visualizer
+# Money Machine Research Stack
 
-A professional Python tool for fetching and visualizing USDT Perpetual Futures data from Bybit with interactive charts.
+Next-generation quant research environment for chaotic crypto futures markets. The stack fuses physics-inspired feature engineering, a democratic feature council, and a Mixture-of-Experts trader governed by an adaptive scheduler.
 
-## 📦 Installation
+## Architecture
 
-Install the required dependencies:
+1. **Data & Physics Engine** (`src/features/advanced_stats.py` / `src/features/__init__.py`)  
+   - Builds OHLCV features with `pandas_ta` plus Numba-accelerated chaos metrics (Hurst, Shannon entropy, FDI) across multiple windows.  
+   - Rolling volatility columns (`volatility_20/100/200`) are emitted for downstream gating logic.
 
-```bash
-pip install pybit pandas plotly pyarrow
-```
+2. **Alpha Council** (`src/features/alpha_council.py`)  
+   - Three voting experts (Lasso/ANOVA, RandomForest, Mutual Information) decide which features survive.  
+   - A feature must place in the top 50% for at least two experts to pass.
 
-## 🚀 Quick Start
+3. **Money Machine Trader** (`src/models/moe_ensemble.py`)  
+   - Mixture-of-Experts: Trend (Gradient Boosting), Range (k-NN), Stress (Logistic Regression).  
+   - Gating MLP consumes `[hurst_200, entropy_200, fdi_200]` to weight each expert per sample.  
+   - `get_system_complexity()` reports the effective parameter count (gating weights + tree nodes + k-NN memory + logistic coefs).
 
-### Option 1: Run Demo (Offline)
+4. **Meta Controller** (`src/training/meta_controller.py`)  
+   - Observes market entropy and volatility to adjust estimator counts / epochs.  
+   - Monitors validation stability and rolling Sharpe decay to trigger deeper training or retraining.
 
-Test the visualization with synthetic data:
-
-```bash
-python demo_visualization.py
-```
-
-This generates realistic BTC price data and creates an interactive HTML chart.
-
-### Option 2: Fetch Live Data
-
-Fetch real data from Bybit:
+## Running the Deep Research Pipeline
 
 ```bash
-python bybit_futures_fetcher.py
+python run_deep_research.py
 ```
 
-**Note**: Requires non-US IP address or VPN due to Bybit's geographic restrictions.
+`run_deep_research.py` orchestrates the full flow:
 
-## 📊 Usage Examples
+1. Fetch live data (Bybit BTCUSDT 60m) via `MarketDataLoader`.  
+2. Build features through the SignalFactory and `apply_rolling_physics`.  
+3. Create quick forward-looking labels (0.5% / 36-bar hurdle).  
+4. Let the Alpha Council select elite features (while forcing the physics trio).  
+5. Split chronologically (80/20) and train the MoE with hyperparameters suggested by the `TrainingScheduler`.  
+6. Print precision / recall metrics, the AI parameter count, and store a validation snapshot at `artifacts/money_machine_snapshot.parquet`.
 
-### Basic Usage
-
-```python
-from bybit_futures_fetcher import BybitFuturesLoader, visualize_data
-from datetime import datetime, timedelta
-
-# Initialize
-loader = BybitFuturesLoader()
-
-# Fetch 3 months of hourly BTCUSDT data
-end_date = datetime.now()
-start_date = end_date - timedelta(days=90)
-
-df = loader.fetch_history(
-    symbol="BTCUSDT",
-    interval="60",  # 1 hour
-    start_date=start_date,
-    end_date=end_date
-)
-
-# Save to parquet
-loader.save_to_parquet(df, "btc_futures.parquet")
-
-# Visualize
-visualize_data(df, "BTCUSDT")
-```
-
-### Supported Intervals
-
-- `"1"` - 1 minute
-- `"3"` - 3 minutes
-- `"5"` - 5 minutes
-- `"15"` - 15 minutes
-- `"30"` - 30 minutes
-- `"60"` - 1 hour (default)
-- `"120"` - 2 hours
-- `"240"` - 4 hours
-- `"D"` - Daily
-- `"W"` - Weekly
-
-### Different Symbols
-
-```python
-# Ethereum
-df = loader.fetch_history("ETHUSDT", "60", start_date, end_date)
-
-# Solana
-df = loader.fetch_history("SOLUSDT", "60", start_date, end_date)
-
-# Any USDT perpetual futures pair
-df = loader.fetch_history("ADAUSDT", "60", start_date, end_date)
-```
-
-## 🎨 Features
-
-### Data Ingestion
-- ✅ Automatic pagination (handles >1000 candles)
-- ✅ Rate limit compliance (100ms delays)
-- ✅ Clean data conversion to pandas DataFrame
-- ✅ Efficient parquet storage
-- ✅ Robust error handling
-
-### Visualization
-- 📈 Interactive candlestick charts
-- 📊 Volume bar charts (color-coded)
-- 📉 Technical indicators (20-period SMA)
-- 🌙 Professional dark theme
-- 🖱️ Zoom and pan controls
-- 💡 Unified hover tooltips
-- 🌐 Auto-opens in web browser
-
-## ⚠️ Troubleshooting
-
-### API Error 403
-
-If you see this error:
+Example console snippet:
 
 ```
-API ACCESS WARNING
-Bybit API returned an access error (403).
+[3] MIXED MODE TRAINING (Mixture-of-Experts)
+    Meta-Controller recommends: {'n_estimators': 270, 'epochs': 38}
+[4] SYSTEM VITAL SIGNS
+    Gating Network Params : 41
+    Trend Expert Nodes    : 3,668
+    Range Memory Units    : 902,016
+    Stress Coefficients   : 649
+    TOTAL AI PARAMETERS   : 906,374
 ```
 
-**Solutions**:
-1. Use a VPN connected to a non-US location
-2. Wait a few minutes if rate-limited
-3. Check your internet connection
-
-### No Data Returned
-
-- Verify the symbol exists on Bybit (e.g., "BTCUSDT")
-- Check date ranges are valid
-- Ensure you're using `category="linear"` for USDT perpetuals
-
-## 📁 File Structure
+## Repository Layout
 
 ```
-quanta futures/
-├── bybit_futures_fetcher.py    # Main script
-├── demo_visualization.py        # Demo with synthetic data
-├── btc_futures.parquet          # Cached data (after first run)
-└── chart_BTCUSDT.html          # Generated interactive chart
+run_deep_research.py            # Master orchestrator
+src/
+  config.py                     # Global constants
+  data_loader.py                # Bybit / cache utilities
+  features/
+    __init__.py                 # SignalFactory + feature helpers
+    advanced_stats.py           # Numba chaos metrics
+    alpha_council.py            # Feature voting system
+  models/
+    __init__.py                 # SniperModelTrainer (primary flow)
+    moe_ensemble.py             # Mixture-of-Experts implementation
+  training/
+    meta_controller.py          # Adaptive scheduler
 ```
 
-## 🔧 Customization
+Legacy one-off scripts (e.g., `run_experiment.py`, visualization demos) remain for backward compatibility but the canonical entry point is `run_deep_research.py`.
 
-### Change SMA Period
+## Requirements
 
-Edit `visualize_data()` function:
+- Python 3.10+  
+- Core libraries: `pandas`, `numpy`, `scikit-learn`, `pandas-ta`, `numba`, `plotly`, `pyarrow`  
+- Exchange connectivity: Bybit public REST (no API key required for historical klines, but non-US IP may be necessary).
 
-```python
-# 50-period SMA instead of 20
-df['SMA_50'] = df['close'].rolling(window=50).mean()
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
 ```
 
-### Add Multiple Indicators
+## Notes & Tips
 
-```python
-df['SMA_20'] = df['close'].rolling(window=20).mean()
-df['SMA_50'] = df['close'].rolling(window=50).mean()
-df['EMA_12'] = df['close'].ewm(span=12).mean()
-
-# Add to chart
-fig.add_trace(go.Scatter(x=df['timestamp'], y=df['SMA_20'], name='SMA 20'))
-fig.add_trace(go.Scatter(x=df['timestamp'], y=df['SMA_50'], name='SMA 50'))
-```
-
-### Export to CSV
-
-```python
-df.to_csv('btc_futures.csv', index=False)
-```
-
-## 📝 Data Format
-
-The DataFrame contains:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `timestamp` | datetime | Candle timestamp |
-| `open` | float | Opening price |
-| `high` | float | Highest price |
-| `low` | float | Lowest price |
-| `close` | float | Closing price |
-| `volume` | float | Trading volume |
-
-## 🚦 Rate Limits
-
-The script includes:
-- 100ms delay between requests
-- Maximum 1000 candles per request (automatic pagination)
-- Graceful error handling for rate limit violations
-
-## 🌐 API Documentation
-
-Official Bybit API docs: https://bybit-exchange.github.io/docs/v5/market/kline
-
-## 📄 License
-
-This project is provided as-is for educational and research purposes.
+- The SignalFactory lags every engineered feature across `[1,2,3,5,8,13]` bars; expect ~1,300 columns before council pruning.  
+- `AlphaCouncil.top_ratio` controls how aggressive the voting cutoff is.  
+- To integrate with other assets or intervals, adjust `src/config.py` and rerun `run_deep_research.py`.  
+- The MoE gating network requires the physics trio; do not remove `hurst_200`, `entropy_200`, or `fdi_200` columns.  
+- Parameter count is a diagnostic metric; use it to track how model capacity changes across runs.
 
 ---
-
-**Created by**: Senior Quantitative Developer  
-**Version**: 1.0.0  
-**Last Updated**: November 2025
-=======
-# QCF
->>>>>>> 0bcb7c5e1344c600665379be628567e16fd0c018
+Created by the Quant Futures Research Team (2025). All components are intended for research use only.

@@ -14,6 +14,13 @@ import warnings
 
 from ..config import DAYS_BACK, FEATURE_STORE
 from ..data_loader import MarketDataLoader
+from .advanced_stats import (
+    apply_rolling_physics,
+    calculate_fdi,
+    calculate_hurst_rs,
+    calculate_shannon_entropy,
+)
+from .alpha_council import AlphaCouncil
 
 warnings.filterwarnings("ignore")
 
@@ -53,13 +60,17 @@ class SignalFactory:
         df["upper_shadow_ratio"] = (upper_shadow / (body_size + 1e-9)).astype(np.float32)
         df["lower_shadow_ratio"] = (lower_shadow / (body_size + 1e-9)).astype(np.float32)
 
-        df["volatility"] = df["log_ret"].rolling(window=20).std().astype(np.float32)
-        hurst_vals = ta.hurst(df["close"], length=100)
-        if hurst_vals is not None:
-            if isinstance(hurst_vals, pd.DataFrame):
-                df["hurst"] = hurst_vals.iloc[:, 0].astype(np.float32)
-            else:
-                df["hurst"] = hurst_vals.astype(np.float32)
+        df["volatility_20"] = df["log_ret"].rolling(window=20).std().astype(np.float32)
+        df["volatility_100"] = df["log_ret"].rolling(window=100).std().astype(np.float32)
+        df["volatility_200"] = df["log_ret"].rolling(window=200).std().astype(np.float32)
+        df["volatility"] = df["volatility_20"]
+        if hasattr(ta, "hurst"):
+            hurst_vals = ta.hurst(df["close"], length=100)
+            if hurst_vals is not None:
+                if isinstance(hurst_vals, pd.DataFrame):
+                    df["hurst"] = hurst_vals.iloc[:, 0].astype(np.float32)
+                else:
+                    df["hurst"] = hurst_vals.astype(np.float32)
 
         print(f"  [STEP B] Parametric indicators for windows: {self.windows}")
         for window in self.windows:
@@ -112,13 +123,13 @@ class SignalFactory:
             df[f"zscore_{window}"] = ((df["close"] - rolling_mean) / rolling_std).astype(np.float32)
             df[f"slope_{window}"] = ta.slope(df["close"], length=window).astype(np.float32)
 
-        print("  [STEP C.2] Physics / Chaos Features")
-        # Hurst and Entropy on Returns
-        df["hurst_100"] = rolling_hurst(df["log_ret"], window=100).astype(np.float32)
-        df["entropy_100"] = rolling_entropy(df["log_ret"], window=100).astype(np.float32)
-        
-        # FDI on Price
-        df["fdi_100"] = rolling_fdi(df["close"], window=100).astype(np.float32)
+        print("  [STEP C.2] Physics / Chaos Features (Numba Accelerated)")
+        df = apply_rolling_physics(df, windows=[100, 200])
+        for window in (100, 200):
+            for feature in ("hurst", "entropy", "fdi"):
+                col = f"{feature}_{window}"
+                if col in df.columns:
+                    df[col] = df[col].astype(np.float32)
 
         print("  [STEP D] Lagged features")
         exclude_cols = ["open", "high", "low", "close", "volume", "timestamp"]
@@ -143,121 +154,6 @@ class SignalFactory:
 
         print(f"[FEATURES] Complete. Shape: {df.shape}")
         return df
-
-
-def rolling_hurst(series: pd.Series, window: int = 100) -> pd.Series:
-    """
-    Calculate Rolling Hurst Exponent using the R/S method.
-    H < 0.5: Mean Reversion
-    H = 0.5: Random Walk
-    H > 0.5: Trending
-    """
-    def get_hurst(x):
-        if len(x) < 8:
-            return 0.5
-        x = np.array(x)
-        # Calculate log returns to stationarize? 
-        # Standard R/S usually works on returns or detrended prices. 
-        # Let's use log returns of the window.
-        # Actually, R/S is often defined on the series itself if checking for persistence in returns?
-        # Usually: Input is Returns.
-        # Let's assume input is log_ret.
-        
-        # We need to handle the case where x is constant
-        if np.std(x) == 0:
-            return 0.5
-
-        # Mean centered
-        m = np.mean(x)
-        y = x - m
-        
-        # Cumulative deviate
-        z = np.cumsum(y)
-        
-        # Range
-        r = np.max(z) - np.min(z)
-        
-        # Standard deviation
-        s = np.std(x, ddof=1)
-        
-        # R/S
-        if s == 0:
-            return 0.5
-        rs = r / s
-        
-        # Hurst estimate (simplified point estimate for fixed N)
-        # H = log(R/S) / log(N)
-        # Note: This is a rough proxy. Rigorous Hurst requires regression over multiple scales.
-        # However, for a rolling feature, this proxy captures the "rescaled range" dynamic well enough.
-        h = np.log(rs) / np.log(len(x))
-        return h
-
-    # Apply to rolling window
-    # Note: Input should be returns, not prices, for R/S analysis of *returns* persistence.
-    # If we want persistence of *price* trend, we use price? 
-    # Standard interpretation: H of returns series.
-    return series.rolling(window=window).apply(get_hurst, raw=True)
-
-
-def rolling_fdi(series: pd.Series, window: int = 100) -> pd.Series:
-    """
-    Calculate Rolling Fractal Dimension Index (FDI).
-    Uses the normalized path length method.
-    """
-    def get_fdi(x):
-        if len(x) < 2:
-            return 1.5
-        x = np.array(x)
-        
-        # Normalize price to [0, 1]
-        max_x = np.max(x)
-        min_x = np.min(x)
-        range_x = max_x - min_x
-        if range_x == 0:
-            return 1.5
-            
-        norm_x = (x - min_x) / range_x
-        
-        # Normalized time steps (0 to 1)
-        n = len(x)
-        norm_t = np.linspace(0, 1, n)
-        
-        # Calculate path length
-        dt = norm_t[1] - norm_t[0]
-        dx = np.diff(norm_x)
-        length = np.sum(np.sqrt(dx**2 + dt**2))
-        
-        # FDI formula
-        # FDI = 1 + (log(L) + log(2)) / log(2*n)
-        # Note: There are variations. This is a common one for time series.
-        fdi = 1 + (np.log(length) + np.log(2)) / np.log(2 * (n - 1))
-        return fdi
-
-    return series.rolling(window=window).apply(get_fdi, raw=True)
-
-
-def rolling_entropy(series: pd.Series, window: int = 100, bins: int = 20) -> pd.Series:
-    """
-    Calculate Rolling Shannon Entropy of returns.
-    Higher entropy = more unpredictability/noise.
-    """
-    def get_entropy(x):
-        if len(x) < 2:
-            return 0.0
-        # Histogram
-        counts, _ = np.histogram(x, bins=bins, density=True)
-        # Probabilities (normalize density to sum to 1 roughly, or just use counts)
-        # Actually np.histogram(density=True) gives PDF value, not probability mass.
-        # We need probability mass.
-        counts, _ = np.histogram(x, bins=bins)
-        probs = counts / np.sum(counts)
-        probs = probs[probs > 0] # Remove zeros for log
-        
-        # Shannon Entropy
-        ent = -np.sum(probs * np.log2(probs))
-        return ent
-
-    return series.rolling(window=window).apply(get_entropy, raw=True)
 
 
 def build_feature_dataset(
@@ -322,14 +218,6 @@ def _derive_volatility(features_df: pd.DataFrame, reference_df: Optional[pd.Data
         return vol.reindex(features_df.index).fillna(0)
     return pd.Series(0.0, index=features_df.index)
 
-
-from .advanced_stats import (
-    apply_rolling_physics,
-    calculate_fdi,
-    calculate_hurst_rs,
-    calculate_shannon_entropy,
-)
-from .alpha_council import AlphaCouncil
 
 __all__ = [
     "AlphaCouncil",

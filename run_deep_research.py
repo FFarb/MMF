@@ -1,206 +1,149 @@
 """
-Deep Quant Pipeline Orchestrator.
-Executes the "Zero-Heuristic" End-to-End ML System:
-1. Feature Engineering (Physics/Chaos)
-2. Universal Model Training (No Filters, No Regime Split)
-3. Walk-Forward Simulation with Continuous Sizing (Kelly-like)
-4. Validation (Hurst vs FDI Scatter)
+Deep Quant Pipeline Orchestrator (Money Machine Edition).
+
+This script is the single source of truth for the research stack:
+1) Builds features with the Numba-accelerated physics engine.
+2) Screens features with the Alpha Council voting protocol.
+3) Trains the Mixture-of-Experts (Mixed Mode) ensemble.
+4) Prints diagnostic statistics including the system complexity score.
 """
+from __future__ import annotations
 
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
 from pathlib import Path
-from typing import Dict, List
+from typing import List, Sequence
 
-from src.config import (
-    SYMBOL, INTERVAL, DAYS_BACK, FEATURE_STORE, 
-    TP_PCT, SL_PCT, BARRIER_HORIZON, LEVERAGE
-)
+import numpy as np
+import pandas as pd
+from sklearn.metrics import classification_report
+
+from src.config import DAYS_BACK
 from src.features import build_feature_dataset
-from src.models import SniperModelTrainer
-from src.metrics import check_mae_mfe
+from src.features.advanced_stats import apply_rolling_physics
+from src.features.alpha_council import AlphaCouncil
+from src.models.moe_ensemble import MixtureOfExpertsEnsemble
+from src.training.meta_controller import TrainingScheduler
 
-def run_pipeline():
-    # --- 1. Data & Features ---
-    print("\n=== STEP 1: Data & Physics Engine ===")
+
+PHYSICS_COLUMNS: Sequence[str] = ("hurst_200", "entropy_200", "fdi_200")
+LABEL_LOOKAHEAD = 36
+LABEL_THRESHOLD = 0.005
+
+
+def _validate_physics_columns(df: pd.DataFrame, columns: Sequence[str]) -> None:
+    missing = [col for col in columns if col not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Physics engine is missing required columns: {missing}. "
+            "Ensure apply_rolling_physics() ran successfully."
+        )
+
+
+def _build_labels(df: pd.DataFrame) -> pd.Series:
+    forward_return = df["close"].shift(-LABEL_LOOKAHEAD) / df["close"] - 1.0
+    y = (forward_return > LABEL_THRESHOLD).astype(int)
+    return y
+
+
+def run_pipeline() -> None:
+    print("=" * 72)
+    print("                     MONEY MACHINE: DEEP RESEARCH PIPELINE")
+    print("=" * 72)
+
+    # ------------------------------------------------------------------ #
+    # 1. Data + Physics Engine
+    # ------------------------------------------------------------------ #
+    print("\n[1] DATA & PHYSICS ENGINE")
     df = build_feature_dataset(days_back=DAYS_BACK, force_refresh=True)
-    
-    # Ensure we have the new features
-    required_cols = ["hurst_100", "fdi_100", "entropy_100"]
-    if not all(col in df.columns for col in required_cols):
-        raise ValueError(f"Missing required physics features: {required_cols}")
+    print("    Applying Numba-accelerated chaos metrics (windows: 100 & 200)...")
+    df = apply_rolling_physics(df, windows=[100, 200])
+    _validate_physics_columns(df, PHYSICS_COLUMNS)
 
-    # --- 2. Universal Model Training (No Filtering) ---
-    print("\n=== STEP 2: Universal Model Training ===")
-    
-    # Split Train/Test chronologically
-    initial_len = len(df)
-    train_split_idx = int(initial_len * 0.8)
-    train_df = df.iloc[:train_split_idx].copy()
-    test_df = df.iloc[train_split_idx:].copy()
-    
-    print(f"Train Set: {len(train_df)} | Test Set: {len(test_df)}")
-    
-    # Train Universal Model
-    trainer = SniperModelTrainer()
-    result = trainer.run(
-        input_df=train_df, 
-        model_name="Universal_Model",
-        output_path="data/universal_model_data.parquet"
+    # ------------------------------------------------------------------ #
+    # 2. Alpha Council Feature Screening
+    # ------------------------------------------------------------------ #
+    print("\n[2] ALPHA COUNCIL (Feature Selection)")
+    raw_labels = _build_labels(df)
+    combined = pd.concat([df, raw_labels.rename("target")], axis=1)
+    combined = combined.dropna(axis=0)
+
+    y = combined["target"].astype(int)
+    exclude_cols = {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "timestamp",
+        "target",
+        *PHYSICS_COLUMNS,
+    }
+    candidates = [col for col in combined.columns if col not in exclude_cols]
+
+    print(f"    Screening {len(candidates)} candidate features...")
+    council = AlphaCouncil()
+    candidate_matrix = combined[candidates]
+    survivors = council.screen_features(candidate_matrix, y)
+    print(f"    Council elected {len(survivors)} elite features.")
+
+    final_features: List[str] = survivors + list(PHYSICS_COLUMNS)
+    X = combined[final_features]
+    _validate_physics_columns(X, PHYSICS_COLUMNS)
+
+    # ------------------------------------------------------------------ #
+    # 3. Mixed Mode Training
+    # ------------------------------------------------------------------ #
+    print("\n[3] MIXED MODE TRAINING (Mixture-of-Experts)")
+    split_idx = int(len(X) * 0.8)
+    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+
+    scheduler = TrainingScheduler()
+    entropy_signal = float(X["entropy_200"].iloc[-1])
+    volatility_signal = float(
+        X["fdi_200"].iloc[-1]
+        if "volatility_200" not in X.columns
+        else X["volatility_200"].iloc[-1]
     )
-    model = result["model"]
-    top_features = result["top_features"]
-    
-    print(f"Top Features Selected: {top_features}")
-    
-    # --- 3. Walk-Forward Simulation (Continuous Sizing) ---
-    print("\n=== STEP 3: Walk-Forward Simulation (Test Set) ===")
-    
-    equity = [10000.0] # Start with $10k
-    equity_curve = []
-    trades = []
-    
-    closes = test_df["close"].values
-    highs = test_df["high"].values
-    lows = test_df["low"].values
-    hursts = test_df["hurst_100"].values
-    fdis = test_df["fdi_100"].values
-    
-    # Feature Matrix for Test
-    X_test = test_df[top_features]
-    
-    n_test = len(test_df)
-    horizon = BARRIER_HORIZON
-    
-    print(f"Simulating {n_test} bars...")
-    
-    # Get probabilities for the entire test set in one go for efficiency
-    # (Or loop if we want to simulate strict step-by-step, but model is static here)
-    probs = model.predict_proba(X_test)[:, 1] # Probability of Class 1 (Win)
-    
-    for i in range(n_test - horizon):
-        current_equity = equity[-1]
-        prob_win = probs[i]
-        
-        # AI Execution Logic: Continuous Sizing
-        # Confidence = Prob_Win - 0.5
-        # If Prob_Win < 0.52 -> Size = 0
-        
-        if prob_win < 0.52:
-            equity_curve.append(current_equity)
-            continue # No Trade
-            
-        confidence = prob_win - 0.5
-        scale_factor = 1.0 # Base scale
-        # Position Size = Confidence * Scale_Factor * Leverage? 
-        # User said: "Position_Size = Confidence * Scale_Factor"
-        # Let's assume this is the % of equity to risk or allocate.
-        # Let's map it to a fraction of equity.
-        # E.g. Confidence 0.15 (Prob 0.65) -> Size 0.15 (15% of equity?)
-        # That seems aggressive but let's follow the logic.
-        # Let's cap it or use the user's LEVERAGE as a multiplier on top?
-        # "Use TradePolicy only for safety limits (Max Leverage)"
-        
-        # Let's define Position Size as % of Equity.
-        # size_pct = confidence * 2.0 (Scaling up? 0.15 * 2 = 0.3 -> 30% allocation)
-        # Let's stick to: size_pct = confidence * 1.0 for now.
-        # But wait, if confidence is 0.02 (0.52), size is 2%.
-        
-        size_pct = confidence * 2.0 # Scaling factor to make it meaningful
-        
-        # Safety Limit
-        max_leverage = LEVERAGE
-        if size_pct > max_leverage:
-            size_pct = max_leverage
-            
-        # Calculate Position Value
-        position_value = current_equity * size_pct
-        
-        # Trade Execution
-        entry_price = closes[i]
-        future_highs = highs[i+1 : i+1+horizon]
-        future_lows = lows[i+1 : i+1+horizon]
-        
-        is_win, mae, mfe = check_mae_mfe(
-            entry_price, future_highs, future_lows, 
-            tp_pct=TP_PCT, sl_pct=SL_PCT
-        )
-        
-        # PnL Calculation
-        # We are Long.
-        # If Win: +TP_PCT * position_value
-        # If Loss: -SL_PCT * position_value
-        # (Simplified, ignoring fees/slippage for now)
-        
-        if is_win:
-            pnl = position_value * TP_PCT
-            outcome = "WIN"
-        else:
-            pnl = -position_value * SL_PCT
-            outcome = "LOSS"
-            
-        new_equity = current_equity + pnl
-        equity.append(new_equity)
-        
-        trades.append({
-            "Index": i,
-            "Hurst": hursts[i],
-            "FDI": fdis[i],
-            "Prob_Win": prob_win,
-            "Size_Pct": size_pct,
-            "Outcome": outcome,
-            "PnL": pnl,
-            "MAE": mae,
-            "MFE": mfe
-        })
-        
-    # --- 4. Validation & Reporting ---
-    trades_df = pd.DataFrame(trades)
-    if len(trades_df) > 0:
-        print("\n=== Simulation Results ===")
-        print(f"Total Trades: {len(trades_df)}")
-        print(f"Final Equity: ${equity[-1]:.2f} (Start: $10,000)")
-        print(f"Win Rate: {len(trades_df[trades_df['Outcome']=='WIN']) / len(trades_df):.2%}")
-        
-        # Plot Equity Curve
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(y=equity_curve, mode='lines', name='Equity'))
-        fig.update_layout(title="Zero-Heuristic Strategy Equity Curve", template="plotly_dark")
-        fig.write_html("equity_curve.html")
-        print("Saved equity_curve.html")
-        
-        # Scatter Plot: X=Hurst, Y=FDI, Color=Model_Probability
-        # We want to see the probability landscape, not just trades.
-        # So let's plot a sample of the Test Set (or all of it) with probabilities.
-        # We can use the 'probs' array and the test_df features.
-        
-        viz_df = pd.DataFrame({
-            "Hurst": hursts[:len(probs)],
-            "FDI": fdis[:len(probs)],
-            "Probability": probs
-        })
-        
-        # Downsample for plotting if too large
-        if len(viz_df) > 5000:
-            viz_df = viz_df.sample(5000)
-            
-        fig2 = px.scatter(
-            viz_df, x="Hurst", y="FDI", color="Probability",
-            title="Model Probability Landscape (Hurst vs FDI)",
-            color_continuous_scale="RdYlGn", # Red to Green
-            template="plotly_dark"
-        )
-        # Add lines for "Chaos Corner" reference (High FDI, Low Hurst)
-        fig2.add_hline(y=1.5, line_dash="dash", annotation_text="High Chaos")
-        fig2.add_vline(x=0.5, line_dash="dash", annotation_text="Random Walk")
-        
-        fig2.write_html("physics_probability_map.html")
-        print("Saved physics_probability_map.html")
-        
-    else:
-        print("No trades executed.")
+    depth = scheduler.suggest_training_depth(entropy_signal, max(volatility_signal, 1e-6))
+    print(f"    Meta-Controller recommends: {depth}")
+
+    moe = MixtureOfExpertsEnsemble(
+        physics_features=PHYSICS_COLUMNS,
+        random_state=42,
+        trend_estimators=depth["n_estimators"],
+        gating_epochs=depth["epochs"],
+    )
+    print("    Training Trend / Range / Stress experts with gating network...")
+    moe.fit(X_train, y_train)
+
+    # ------------------------------------------------------------------ #
+    # 4. System Vital Signs
+    # ------------------------------------------------------------------ #
+    print("\n[4] SYSTEM VITAL SIGNS")
+    complexity = moe.get_system_complexity()
+    print(f"    Gating Network Params : {complexity['Gating_Network_Params']:,}")
+    print(f"    Trend Expert Nodes    : {complexity['Trend_Expert_Nodes']:,}")
+    print(f"    Range Memory Units    : {complexity['Range_Expert_Memory']:,}")
+    print(f"    Stress Coefficients   : {complexity['Stress_Expert_Coefs']:,}")
+    print("-" * 60)
+    print(f"    TOTAL AI PARAMETERS   : {complexity['Total_System_Complexity']:,}")
+
+    # ------------------------------------------------------------------ #
+    # 5. Validation Snapshot
+    # ------------------------------------------------------------------ #
+    print("\n[5] VALIDATION SNAPSHOT")
+    probs = moe.predict_proba(X_test)[:, 1]
+    preds = (probs > 0.5).astype(int)
+    report = classification_report(y_test, preds, digits=4)
+    print(report)
+    print("    Sample probabilities:", np.round(probs[:5], 4))
+
+    artifacts = Path("artifacts")
+    artifacts.mkdir(exist_ok=True)
+    summary_path = artifacts / "money_machine_snapshot.parquet"
+    pd.DataFrame({"probability": probs, "target": y_test}).to_parquet(summary_path)
+    print(f"    Stored validation snapshot at {summary_path}")
+
 
 if __name__ == "__main__":
     run_pipeline()

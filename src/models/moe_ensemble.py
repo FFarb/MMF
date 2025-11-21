@@ -10,7 +10,7 @@ observation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, List, Sequence
+from typing import Dict, Iterable, List, Sequence
 
 import numpy as np
 import pandas as pd
@@ -68,11 +68,13 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         default_factory=lambda: ("hurst_200", "entropy_200", "volatility_200")
     )
     random_state: int = 42
+    trend_estimators: int = 300
+    gating_epochs: int = 500
 
     def __post_init__(self) -> None:
         self.trend_expert = GradientBoostingClassifier(
             learning_rate=0.05,
-            n_estimators=300,
+            n_estimators=self.trend_estimators,
             max_depth=3,
             random_state=self.random_state,
         )
@@ -86,7 +88,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             hidden_layer_sizes=(8,),
             activation="tanh",
             alpha=1e-3,
-            max_iter=500,
+            max_iter=self.gating_epochs,
             random_state=self.random_state,
         )
         self.feature_scaler = StandardScaler()
@@ -181,6 +183,44 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         """
         probabilities = self.predict_proba(X)
         return np.argmax(probabilities, axis=1)
+
+    def get_system_complexity(self) -> Dict[str, int]:
+        """
+        Estimate the effective parameter count of the hybrid ensemble.
+        """
+        self._check_is_fitted()
+
+        # Gating network (MLP) parameters
+        mlp_params = 0
+        for coef in self.gating_network.coefs_:
+            mlp_params += coef.size
+        for intercept in self.gating_network.intercepts_:
+            mlp_params += intercept.size
+
+        # Trend expert complexity = total nodes across boosting ensemble
+        trend_complexity = 0
+        if hasattr(self.trend_expert, "estimators_"):
+            for tree_set in self.trend_expert.estimators_:
+                for tree in tree_set:
+                    trend_complexity += getattr(tree.tree_, "node_count", 0)
+
+        # Range expert stores training samples
+        range_complexity = int(getattr(self.range_expert, "_fit_X", np.empty(0)).size)
+
+        # Stress expert coefficients
+        stress_complexity = 0
+        if hasattr(self.stress_expert, "coef_"):
+            stress_complexity += self.stress_expert.coef_.size
+            stress_complexity += getattr(self.stress_expert, "intercept_", np.empty(0)).size
+
+        total = mlp_params + trend_complexity + range_complexity + stress_complexity
+        return {
+            "Gating_Network_Params": mlp_params,
+            "Trend_Expert_Nodes": trend_complexity,
+            "Range_Expert_Memory": range_complexity,
+            "Stress_Expert_Coefs": stress_complexity,
+            "Total_System_Complexity": total,
+        }
 
 
 __all__ = ["MixtureOfExpertsEnsemble"]
