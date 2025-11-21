@@ -12,8 +12,8 @@ import pandas as pd
 import pandas_ta as ta
 import warnings
 
-from .config import DAYS_BACK, FEATURE_STORE
-from .data_loader import MarketDataLoader
+from ..config import DAYS_BACK, FEATURE_STORE
+from ..data_loader import MarketDataLoader
 
 warnings.filterwarnings("ignore")
 
@@ -321,6 +321,23 @@ def _derive_volatility(features_df: pd.DataFrame, reference_df: Optional[pd.Data
         vol = log_ret.rolling(window=20).std()
         return vol.reindex(features_df.index).fillna(0)
     return pd.Series(0.0, index=features_df.index)
+
+
+from .advanced_stats import (
+    apply_rolling_physics,
+    calculate_fdi,
+    calculate_hurst_rs,
+    calculate_shannon_entropy,
+)
+from .alpha_council import AlphaCouncil
+
+__all__ = [
+    "AlphaCouncil",
+    "apply_rolling_physics",
+    "calculate_fdi",
+    "calculate_hurst_rs",
+    "calculate_shannon_entropy",
+]
 
 
 def _derive_hurst(features_df: pd.DataFrame, reference_df: Optional[pd.DataFrame]) -> pd.Series:

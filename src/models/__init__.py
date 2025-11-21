@@ -15,7 +15,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassif
 from sklearn.feature_selection import VarianceThreshold, mutual_info_classif
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 
-from .config import (
+from ..config import (
     BARRIER_HORIZON,
     FEATURE_STORE,
     RANDOM_SEED,
@@ -31,8 +31,8 @@ from .config import (
     META_PROB_THRESHOLD,
     PRIMARY_RECALL_TARGET,
 )
-from .meta_model import MetaModelTrainer
-from .metrics import profit_weighted_confusion_matrix
+from ..meta_model import MetaModelTrainer
+from ..metrics import profit_weighted_confusion_matrix
 
 
 def get_triple_barrier_labels(
@@ -415,3 +415,8 @@ class SniperModelTrainer:
         filename = f"{model_name}_feature_importance.html"
         fig.write_html(filename)
         print(f"[MODEL] Feature importance chart saved to {filename}")
+
+
+from .moe_ensemble import MixtureOfExpertsEnsemble
+
+__all__ = ["MixtureOfExpertsEnsemble"]
