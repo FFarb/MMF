@@ -53,3 +53,5 @@ Thumbs.db
 *.html
 paper_trade_log.csv
 *.log
+
+*.parquet

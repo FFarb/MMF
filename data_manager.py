@@ -173,6 +173,9 @@ class BybitDataManager:
         mask = (df.index >= start_time) & (df.index <= end_time)
         filtered_df = df[mask].copy()
         
+        # Remove duplicate timestamps (keep first occurrence)
+        filtered_df = filtered_df[~filtered_df.index.duplicated(keep='first')]
+        
         print(f"  [OK] Prepared {len(filtered_df)} candles")
         print(f"  Date range: {filtered_df.index[0]} to {filtered_df.index[-1]}")
         
