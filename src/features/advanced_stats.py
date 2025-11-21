@@ -206,12 +206,16 @@ def apply_rolling_physics(
 ) -> pd.DataFrame:
     """
     Apply rolling physics indicators across multiple lookback windows.
+    
+    For multi-asset data (with 'asset_id' column), calculates indicators
+    per-asset to prevent feature bleeding between different cryptocurrencies.
 
     Parameters
     ----------
     df : pd.DataFrame
         Input market data. A numeric column named 'close', 'price', or similar
         is preferred; otherwise the first numeric column is used.
+        If 'asset_id' column exists, calculations are done per-asset.
     windows : Sequence[int], optional
         Window sizes to evaluate. Defaults to (100, 200).
 
@@ -225,6 +229,34 @@ def apply_rolling_physics(
     if not isinstance(windows, Sequence) or len(windows) == 0:
         raise ValueError("At least one window length must be provided.")
 
+    # Check if multi-asset mode
+    if 'asset_id' in df.columns:
+        print("    [PHYSICS] Multi-asset mode detected, calculating per asset...")
+        groups = []
+        for asset_id in sorted(df['asset_id'].unique()):
+            asset_df = df[df['asset_id'] == asset_id].copy()
+            print(f"      Processing asset_id={asset_id} ({len(asset_df)} rows)...")
+            
+            # Calculate physics for this asset
+            asset_df = _calculate_physics_single_asset(asset_df, windows)
+            groups.append(asset_df)
+        
+        result = pd.concat(groups).sort_index()
+        print(f"    [PHYSICS] Completed for {len(groups)} assets")
+        return result
+    else:
+        # Single-asset mode
+        return _calculate_physics_single_asset(df, windows)
+
+
+def _calculate_physics_single_asset(
+    df: pd.DataFrame, windows: Sequence[int]
+) -> pd.DataFrame:
+    """
+    Calculate physics indicators for a single asset.
+    
+    Internal helper function used by apply_rolling_physics.
+    """
     price_series = _select_price_column(df)
     result = df.copy()
 

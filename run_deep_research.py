@@ -1,12 +1,13 @@
 """
-Deep Quant Pipeline Orchestrator (Bicameral Edition).
+Deep Quant Pipeline Orchestrator (Multi-Asset Bicameral Edition).
 
-This script implements the Neuro-Symbolic "Bicameral" Trading System:
-1) Builds features with the Numba-accelerated physics engine.
-2) Screens features with the Alpha Council voting protocol.
-3) Trains the Bicameral Hybrid Ensemble (Symbolic + Neural + Meta-Learner).
-4) Optimizes trading threshold using Sharpe Proxy metric.
-5) Prints comprehensive system diagnostics.
+This script implements the Neuro-Symbolic "Bicameral" Trading System with multi-asset support:
+1) Loads multi-asset data with asset_id tracking
+2) Builds features with the Numba-accelerated physics engine (per-asset)
+3) Screens features with the Alpha Council voting protocol
+4) Trains the Bicameral Hybrid Ensemble (Symbolic + Neural + Meta-Learner)
+5) Optimizes trading threshold using Sharpe Proxy metric
+6) Reports per-coin performance metrics
 """
 from __future__ import annotations
 
@@ -15,10 +16,11 @@ from typing import List, Sequence
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, precision_score, recall_score
 
 from src.analysis.threshold_tuner import run_tuning
-from src.config import DAYS_BACK
+from src.config import DAYS_BACK, SYMBOLS
+from src.data_loader import MarketDataLoader
 from src.features import build_feature_dataset
 from src.features.advanced_stats import apply_rolling_physics
 from src.features.alpha_council import AlphaCouncil
@@ -41,22 +43,45 @@ def _validate_physics_columns(df: pd.DataFrame, columns: Sequence[str]) -> None:
 
 
 def _build_labels(df: pd.DataFrame) -> pd.Series:
-    forward_return = df["close"].shift(-LABEL_LOOKAHEAD) / df["close"] - 1.0
-    y = (forward_return > LABEL_THRESHOLD).astype(int)
-    return y
+    """Build labels per-asset to respect boundaries."""
+    if 'asset_id' in df.columns:
+        # Multi-asset: calculate per asset
+        labels = []
+        for asset_id in sorted(df['asset_id'].unique()):
+            asset_df = df[df['asset_id'] == asset_id].copy()
+            forward_return = asset_df["close"].shift(-LABEL_LOOKAHEAD) / asset_df["close"] - 1.0
+            y = (forward_return > LABEL_THRESHOLD).astype(int)
+            labels.append(y)
+        return pd.concat(labels).sort_index()
+    else:
+        # Single-asset
+        forward_return = df["close"].shift(-LABEL_LOOKAHEAD) / df["close"] - 1.0
+        y = (forward_return > LABEL_THRESHOLD).astype(int)
+        return y
 
 
 def run_pipeline() -> None:
     print("=" * 72)
-    print("          NEURO-SYMBOLIC BICAMERAL TRADING SYSTEM")
+    print("     MULTI-ASSET NEURO-SYMBOLIC BICAMERAL TRADING SYSTEM")
     print("=" * 72)
 
     # ------------------------------------------------------------------ #
-    # 1. Data + Physics Engine
+    # 1. Multi-Asset Data + Physics Engine
     # ------------------------------------------------------------------ #
-    print("\n[1] DATA & PHYSICS ENGINE")
-    df = build_feature_dataset(days_back=DAYS_BACK, force_refresh=True)
+    print("\n[1] MULTI-ASSET DATA & PHYSICS ENGINE")
+    
+    # Load multi-asset data
+    loader = MarketDataLoader()
+    print(f"    Loading {len(SYMBOLS)} assets with {DAYS_BACK} days of 5-minute data...")
+    df_raw = loader.fetch_all_assets(days_back=DAYS_BACK, force_refresh=False)
+    print(f"    Loaded {len(df_raw)} total rows across {df_raw['asset_id'].nunique()} assets")
+    
+    # Build features (will be added per-asset in future enhancement)
+    # For now, we'll use the raw OHLCV data
+    df = df_raw.copy()
+    
     print("    Applying Numba-accelerated chaos metrics (windows: 100 & 200)...")
+    print("    [CRITICAL] Calculating per-asset to prevent feature bleeding...")
     df = apply_rolling_physics(df, windows=[100, 200])
     _validate_physics_columns(df, PHYSICS_COLUMNS)
 
@@ -77,6 +102,8 @@ def run_pipeline() -> None:
         "volume",
         "timestamp",
         "target",
+        "asset_id",  # Exclude from screening but keep in dataset
+        "symbol",
         *PHYSICS_COLUMNS,
     }
     candidates = [col for col in combined.columns if col not in exclude_cols]
@@ -88,6 +115,11 @@ def run_pipeline() -> None:
     print(f"    Council elected {len(survivors)} elite features.")
 
     final_features: List[str] = survivors + list(PHYSICS_COLUMNS)
+    
+    # Ensure asset_id is passed to model if present
+    if "asset_id" in combined.columns:
+        final_features.append("asset_id")
+        
     X = combined[final_features]
     _validate_physics_columns(X, PHYSICS_COLUMNS)
 
@@ -141,8 +173,35 @@ def run_pipeline() -> None:
     print("\n[5] VALIDATION & THRESHOLD OPTIMIZATION")
     probs = moe.predict_proba(X_test)[:, 1]
     preds = (probs > 0.5).astype(int)
+    
+    print("\n    GLOBAL PERFORMANCE:")
     report = classification_report(y_test, preds, digits=4)
     print(report)
+    
+    # Per-coin reporting
+    if "asset_id" in X_test.columns:
+        print("\n    PER-COIN PERFORMANCE:")
+        print("    " + "-" * 60)
+        print(f"    {'SYMBOL':<10} | {'PRECISION':<10} | {'RECALL':<10} | {'SAMPLES':<10}")
+        print("    " + "-" * 60)
+        
+        unique_assets = sorted(X_test["asset_id"].unique())
+        for asset_id in unique_assets:
+            # Map asset_id back to symbol if possible (using SYMBOLS from config)
+            symbol = SYMBOLS[int(asset_id)] if int(asset_id) < len(SYMBOLS) else f"Asset {asset_id}"
+            
+            mask = X_test["asset_id"] == asset_id
+            if mask.sum() > 0:
+                y_coin = y_test[mask]
+                preds_coin = preds[mask]
+                
+                prec = precision_score(y_coin, preds_coin, zero_division=0)
+                rec = recall_score(y_coin, preds_coin, zero_division=0)
+                count = len(y_coin)
+                
+                print(f"    {symbol:<10} | {prec:.2%}    | {rec:.2%}    | {count:<10}")
+        print("    " + "-" * 60)
+
     print("    Sample probabilities:", np.round(probs[:5], 4))
 
     # Save validation predictions for threshold tuning
