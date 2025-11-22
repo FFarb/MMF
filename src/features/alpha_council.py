@@ -28,7 +28,7 @@ class AlphaCouncil:
         # 2. Hierarchical Clustering
         # Fill NaNs with 0 to avoid linkage errors
         dist_matrix = 1 - corr_matrix.fillna(0)
-        dist_array = dist_matrix.to_numpy()  # Create writable copy
+        dist_array = np.array(dist_matrix.values, copy=True)  # Force writable copy
         np.fill_diagonal(dist_array, 0)
         condensed_dist = squareform(dist_array)
         
