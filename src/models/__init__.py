@@ -187,7 +187,7 @@ class SniperModelTrainer:
         """
         Execute the labeling, feature ranking, model training, and artifact saving workflow.
         """
-        df_labeled, X, y, feature_cols = self.prepare_training_frame(
+        df_labeled, X, y, feature_cols, weights = self.prepare_training_frame(
             feature_store=feature_store,
             input_df=input_df,
         )
@@ -203,7 +203,7 @@ class SniperModelTrainer:
         print(f"[COUNCIL] {len(selected_features)} survivor features after voting.")
 
         metrics, model, training_meta = self._train_model(
-            X_corr[selected_features], y, model_name, physics_features
+            X_corr[selected_features], y, model_name, physics_features, sample_weights=weights
         )
 
         final_cols = ["open", "high", "low", "close", "volume"] + selected_features + ["target"]
@@ -226,9 +226,9 @@ class SniperModelTrainer:
         self,
         feature_store: Path | str = FEATURE_STORE,
         input_df: Optional[pd.DataFrame] = None,
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, List[str]]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, List[str], Optional[np.ndarray]]:
         """
-        Load the feature store, apply labeling, and return (df, X, y, feature_cols).
+        Load the feature store, apply labeling, and return (df, X, y, feature_cols, weights).
         """
         if input_df is not None:
             df = input_df.copy()
@@ -251,7 +251,11 @@ class SniperModelTrainer:
         feature_cols = [col for col in df_labeled.columns if col not in exclude_cols]
         X = df_labeled[feature_cols]
         y = df_labeled["target"].astype(int)
-        return df_labeled, X, y, feature_cols
+        
+        # Calculate sample weights based on future returns
+        weights = self._calculate_sample_weights(df_labeled)
+        
+        return df_labeled, X, y, feature_cols, weights
 
     def _load_features(self, feature_store: Path | str) -> pd.DataFrame:
         path = Path(feature_store)
@@ -366,10 +370,14 @@ class SniperModelTrainer:
         y: pd.Series,
         model_name: str,
         physics_features: Sequence[str],
+        sample_weights: Optional[np.ndarray] = None  # New arg
     ):
         split_idx = int(len(X) * self.train_split)
         X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
         y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+        
+        # Split weights
+        w_train = sample_weights[:split_idx] if sample_weights is not None else None
 
         scheduler = TrainingScheduler()
         entropy_signal = self._feature_mean(X, "entropy_200", default=0.8)
@@ -383,7 +391,18 @@ class SniperModelTrainer:
             trend_estimators=depth["n_estimators"],
             gating_epochs=depth["epochs"],
         )
-        clf.fit(X_train, y_train)
+        
+        # FIT WITH WEIGHTS
+        clf.fit(X_train, y_train, sample_weight=w_train)
+        
+        # TELEMETRY CHECK
+        telemetry = clf.get_expert_telemetry(X_test)
+        print("\n[TELEMETRY] MoE Internal State (Test Set):")
+        print(f"    Trend Expert Share : {telemetry.get('share_trend', 0):.1%}")
+        print(f"    Range Expert Share : {telemetry.get('share_range', 0):.1%}")
+        print(f"    Stress Expert Share: {telemetry.get('share_stress', 0):.1%}")
+        print(f"    Gating Confidence  : {telemetry.get('gating_confidence', 0):.3f}")
+        
         y_pred = clf.predict(X_test)
 
         # Calculate standard metrics
@@ -393,7 +412,7 @@ class SniperModelTrainer:
             "accuracy": accuracy_score(y_test, y_pred),
         }
         print(
-            f"[MODEL] Precision={metrics['precision']:.4f} "
+            f"\n[MODEL] Precision={metrics['precision']:.4f} "
             f"Recall={metrics['recall']:.4f} Accuracy={metrics['accuracy']:.4f}"
         )
         
@@ -432,6 +451,33 @@ class SniperModelTrainer:
             raise ValueError("No volatility proxy available for Mixture-of-Experts gating network.")
 
         return required
+
+    def _calculate_sample_weights(self, df: pd.DataFrame) -> Optional[np.ndarray]:
+        """
+        Calculate sample weights based on future returns.
+        Higher weights for samples with stronger directional moves.
+        """
+        if 'close' not in df.columns:
+            print("[WEIGHTS] No 'close' column found, using uniform weights")
+            return None
+        
+        close = df['close'].to_numpy()
+        
+        # Calculate forward returns (next bar)
+        future_ret = np.zeros(len(close))
+        future_ret[:-1] = (close[1:] - close[:-1]) / close[:-1]
+        
+        # Weight by absolute return magnitude (emphasize strong moves)
+        abs_ret = np.abs(future_ret)
+        
+        # Normalize to [0.5, 2.0] range to avoid extreme weights
+        if abs_ret.max() > 0:
+            weights = 0.5 + 1.5 * (abs_ret / abs_ret.max())
+        else:
+            weights = np.ones(len(close))
+        
+        print(f"[WEIGHTS] Calculated sample weights: mean={weights.mean():.3f}, std={weights.std():.3f}")
+        return weights
 
     def _feature_mean(self, X: pd.DataFrame, column: str, default: float) -> float:
         if column not in X.columns:
