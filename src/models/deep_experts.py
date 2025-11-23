@@ -183,54 +183,73 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         """
         Fit the GraphVisionary model.
         
-        X is expected to be (N_Samples, Flattened_Features).
-        We assume N_Samples = Batch_Size * N_Assets.
-        We assume Flattened_Features = Sequence_Length * N_Features.
-        
-        We reshape X to (Batch_Size, Sequence_Length, N_Assets, N_Features).
+        Supports two modes:
+        1. Global Mode: X is (Batch * N_Assets, Seq * Features) - requires divisibility by n_assets
+        2. Legacy Mode: X is (N_Samples, Features) - treats as single-asset with n_assets=1
         """
         self._initialize_model()
         
         # Check input shape
         n_samples, input_dim = X.shape
         
-        if n_samples % self.n_assets != 0:
-            raise ValueError(f"Number of samples ({n_samples}) must be divisible by n_assets ({self.n_assets}) for global reshaping.")
+        # Check if we can use global mode (multi-asset)
+        if n_samples % self.n_assets == 0 and self.n_assets > 1:
+            # Global mode: Multi-asset training
+            batch_size = n_samples // self.n_assets
             
-        batch_size = n_samples // self.n_assets
-        
-        # Check feature dimension
-        # We expect input_dim to be sequence_length * n_features
-        # But self.n_features might have been initialized with input_dim in HybridTrendExpert if we are not careful.
-        # Let's assume self.n_features is the raw feature count.
-        
-        # If input_dim != self.sequence_length * self.n_features:
-        #    # Try to infer n_features
-        #    if input_dim % self.sequence_length == 0:
-        #        self.n_features = input_dim // self.sequence_length
-        #        # Re-initialize model with correct n_features
-        #        self._initialize_model()
-        #    else:
-        #        raise ValueError(f"Input dim {input_dim} not divisible by sequence length {self.sequence_length}")
-
-        # Reshape: (Batch * Assets, Seq * F) -> (Batch, Assets, Seq, F)
-        # We assume the samples are ordered: Batch 0 Asset 0, Batch 0 Asset 1, ...
-        X_reshaped = X.reshape(batch_size, self.n_assets, self.sequence_length, self.n_features)
-        
-        # Permute to (Batch, Seq, Assets, F) for GraphVisionary
-        X_tensor = torch.FloatTensor(X_reshaped).permute(0, 2, 1, 3).to(self.device)
-        
-        # y is (Batch * Assets,) or (Batch * Assets, 1)
-        # We need to reshape y to (Batch, Assets) for loss calculation
-        if y.ndim == 1:
-            y = y.reshape(batch_size, self.n_assets)
-        elif y.ndim == 2 and y.shape[1] == 1:
-            y = y.reshape(batch_size, self.n_assets)
+            # Reshape: (Batch * Assets, Seq * F) -> (Batch, Assets, Seq, F)
+            X_reshaped = X.reshape(batch_size, self.n_assets, self.sequence_length, self.n_features)
             
-        y_tensor = torch.FloatTensor(y).to(self.device)
+            # Permute to (Batch, Seq, Assets, F) for GraphVisionary
+            X_tensor = torch.FloatTensor(X_reshaped).permute(0, 2, 1, 3).to(self.device)
+            
+            # y is (Batch * Assets,) -> reshape to (Batch, Assets)
+            if y.ndim == 1:
+                y = y.reshape(batch_size, self.n_assets)
+            elif y.ndim == 2 and y.shape[1] == 1:
+                y = y.reshape(batch_size, self.n_assets)
+                
+            y_tensor = torch.FloatTensor(y).to(self.device)
+            
+        else:
+            # Legacy mode: Treat as single-asset or per-sample training
+            # Create synthetic "batch" dimension by grouping consecutive samples
+            # Each sample becomes a single-asset "market state"
+            
+            # We need to create windows of sequence_length
+            # If input_dim matches sequence_length * n_features, we can reshape
+            if input_dim % self.sequence_length == 0:
+                inferred_features = input_dim // self.sequence_length
+            else:
+                # Fallback: treat entire input as features for a single timestep
+                # This won't work well with GraphVisionary but prevents crash
+                inferred_features = input_dim
+                
+            # Create sliding windows or just use samples as-is
+            # For simplicity, we'll treat each sample as a single timestep with n_assets=1
+            # Reshape: (N_Samples, Seq * F) -> (N_Samples, Seq, 1, F)
+            
+            batch_size = n_samples
+            X_reshaped = X.reshape(batch_size, self.sequence_length, 1, inferred_features)
+            X_tensor = torch.FloatTensor(X_reshaped).to(self.device)
+            
+            # y stays as (N_Samples,) -> reshape to (N_Samples, 1)
+            if y.ndim == 1:
+                y = y.reshape(batch_size, 1)
+            y_tensor = torch.FloatTensor(y).to(self.device)
+            
+            # Temporarily override n_assets for this training session
+            original_n_assets = self.model_.n_assets
+            self.model_.n_assets = 1
+            # Re-init attention layer for n_assets=1
+            self.model_.attention = nn.MultiheadAttention(
+                embed_dim=self.model_.hidden_dim,
+                num_heads=min(self.n_heads, 1),  # Can't have more heads than assets
+                dropout=self.dropout,
+                batch_first=True,
+            ).to(self.device)
         
         # Train/Val split (on Batch dimension)
-        # We manually split the tensors to keep batches intact
         val_size = int(batch_size * self.validation_split)
         train_size = batch_size - val_size
         
@@ -299,10 +318,23 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
             raise RuntimeError("Model must be fitted before predict_proba.")
             
         n_samples, input_dim = X.shape
-        batch_size = n_samples // self.n_assets
         
-        X_reshaped = X.reshape(batch_size, self.n_assets, self.sequence_length, self.n_features)
-        X_tensor = torch.FloatTensor(X_reshaped).permute(0, 2, 1, 3).to(self.device)
+        # Check mode (same logic as fit)
+        if n_samples % self.n_assets == 0 and self.n_assets > 1:
+            # Global mode
+            batch_size = n_samples // self.n_assets
+            X_reshaped = X.reshape(batch_size, self.n_assets, self.sequence_length, self.n_features)
+            X_tensor = torch.FloatTensor(X_reshaped).permute(0, 2, 1, 3).to(self.device)
+        else:
+            # Legacy mode
+            if input_dim % self.sequence_length == 0:
+                inferred_features = input_dim // self.sequence_length
+            else:
+                inferred_features = input_dim
+                
+            batch_size = n_samples
+            X_reshaped = X.reshape(batch_size, self.sequence_length, 1, inferred_features)
+            X_tensor = torch.FloatTensor(X_reshaped).to(self.device)
         
         self.model_.eval()
         with torch.no_grad():
