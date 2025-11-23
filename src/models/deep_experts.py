@@ -132,6 +132,9 @@ class CausalAttention(nn.Module):
         energy_j = energy.squeeze(-1).unsqueeze(1)  # (B, 1, N)
         bias = energy_j - energy_i  # (B, N, N)
         
+        # Scale bias to avoid explosion (Physics update)
+        bias = torch.tanh(bias) * 2.0
+        
         # Add bias to scores (broadcast across heads)
         scores = scores + bias.unsqueeze(1)  # (B, H, N, N)
         
@@ -411,13 +414,9 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
             # Temporarily override n_assets for this training session
             original_n_assets = self.model_.n_assets
             self.model_.n_assets = 1
-            # Re-init attention layer for n_assets=1
-            self.model_.attention = nn.MultiheadAttention(
-                embed_dim=self.model_.hidden_dim,
-                num_heads=min(self.n_heads, 1),  # Can't have more heads than assets
-                dropout=self.dropout,
-                batch_first=True,
-            ).to(self.device)
+            # Note: We do NOT replace self.model_.attention with nn.MultiheadAttention anymore.
+            # CausalAttention handles n_assets=1 correctly (bias becomes 0).
+            # This prevents the "unexpected keyword argument 'energy'" error.
         
         # Train/Val split (on Batch dimension)
         val_size = int(batch_size * self.validation_split)
