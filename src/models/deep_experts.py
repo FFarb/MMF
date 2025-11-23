@@ -518,4 +518,3 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         return np.hstack([1.0 - probs_flat, probs_flat])
 
 __all__ = ["EnergyNet", "CausalAttention", "GraphVisionary", "TorchSklearnWrapper"]
-
