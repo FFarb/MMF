@@ -16,14 +16,169 @@ from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.model_selection import train_test_split
 
 
+class EnergyNet(nn.Module):
+    """
+    Energy Network: Computes scalar "Energy" for each asset based on raw features.
+    
+    Energy represents market activity (volume, volatility) and determines
+    gravitational influence in the Causal Attention mechanism.
+    
+    Input: (Batch, N_Assets, N_Features) - features from last timestep
+    Output: (Batch, N_Assets, 1) - Energy scores
+    """
+    
+    def __init__(self, n_features: int, hidden_dim: int = 32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_features, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid(),  # Normalize to [0, 1]
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Energy scores.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Raw features of shape (Batch, N_Assets, N_Features)
+            
+        Returns
+        -------
+        torch.Tensor
+            Energy scores of shape (Batch, N_Assets, 1)
+        """
+        return self.net(x)
+
+
+class CausalAttention(nn.Module):
+    """
+    Causal Attention with Market Physics:
+    - Soft Bias (Gravity): High-energy assets attract low-energy assets
+    - Hard Gating (Burnout): Weak interactions are pruned
+    
+    This implements energy-based attention where assets with higher Energy
+    exert stronger gravitational pull on assets with lower Energy.
+    """
+    
+    def __init__(self, embed_dim: int, n_heads: int = 4, dropout: float = 0.2, threshold: float = 0.01):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_heads = n_heads
+        self.head_dim = embed_dim // n_heads
+        self.threshold = threshold
+        
+        assert embed_dim % n_heads == 0, "embed_dim must be divisible by n_heads"
+        
+        # Q, K, V projections
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        energy: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Causal attention forward pass with Energy-based bias and gating.
+        
+        Parameters
+        ----------
+        query : torch.Tensor
+            Query tensor (Batch, N_Assets, Embed_Dim)
+        key : torch.Tensor
+            Key tensor (Batch, N_Assets, Embed_Dim)
+        value : torch.Tensor
+            Value tensor (Batch, N_Assets, Embed_Dim)
+        energy : torch.Tensor
+            Energy scores (Batch, N_Assets, 1)
+            
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            (attn_output, attn_weights)
+            attn_output: (Batch, N_Assets, Embed_Dim)
+            attn_weights: (Batch, N_Assets, N_Assets)
+        """
+        batch_size, n_assets, _ = query.shape
+        
+        # Project Q, K, V
+        Q = self.q_proj(query)  # (B, N, E)
+        K = self.k_proj(key)    # (B, N, E)
+        V = self.v_proj(value)  # (B, N, E)
+        
+        # Reshape for multi-head: (B, N, E) -> (B, H, N, D)
+        Q = Q.view(batch_size, n_assets, self.n_heads, self.head_dim).transpose(1, 2)
+        K = K.view(batch_size, n_assets, self.n_heads, self.head_dim).transpose(1, 2)
+        V = V.view(batch_size, n_assets, self.n_heads, self.head_dim).transpose(1, 2)
+        
+        # Step A: Calculate raw attention scores
+        # S = (Q · K^T) / sqrt(d)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        # scores: (B, H, N, N)
+        
+        # Step B: Soft Causal Bias (Gravity)
+        # Bias[i, j] = Energy[j] - Energy[i]
+        # High-energy assets (j) exert stronger pull on low-energy assets (i)
+        energy_i = energy.squeeze(-1).unsqueeze(2)  # (B, N, 1)
+        energy_j = energy.squeeze(-1).unsqueeze(1)  # (B, 1, N)
+        bias = energy_j - energy_i  # (B, N, N)
+        
+        # Add bias to scores (broadcast across heads)
+        scores = scores + bias.unsqueeze(1)  # (B, H, N, N)
+        
+        # Step C: Softmax
+        attn_weights = F.softmax(scores, dim=-1)  # (B, H, N, N)
+        
+        # Step D: Hard Gating (Burnout)
+        # Mask weak interactions below threshold
+        mask = (attn_weights > self.threshold).float()  # (B, H, N, N)
+        attn_weights = attn_weights * mask
+        
+        # Renormalize so rows sum to 1
+        row_sums = attn_weights.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+        attn_weights = attn_weights / row_sums
+        
+        # Apply dropout
+        attn_weights = self.dropout(attn_weights)
+        
+        # Step E: Compute context
+        # attn_output = P · V
+        attn_output = torch.matmul(attn_weights, V)  # (B, H, N, D)
+        
+        # Reshape back: (B, H, N, D) -> (B, N, E)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, n_assets, self.embed_dim)
+        
+        # Output projection
+        attn_output = self.out_proj(attn_output)
+        
+        # Return averaged attention weights across heads for visualization
+        attn_weights_avg = attn_weights.mean(dim=1)  # (B, N, N)
+        
+        return attn_output, attn_weights_avg
+
+
 class GraphVisionary(nn.Module):
     """
-    GraphVisionary: "Social" Neural Expert with Cross-Asset Attention.
+    GraphVisionary: Causal Hybrid Visionary with Market Physics.
+    
+    PATCH #5: Upgraded with Energy-based Causal Attention.
     
     Architecture:
-    1. Local Encoder (Per-Asset): LSTM/Conv1d extracting temporal features.
-    2. Liquidity Router (Cross-Asset): Multi-Head Attention mixing asset embeddings.
-    3. Gating/Output: MLP projecting to probabilities.
+    1. Local Encoder (Per-Asset): LSTM extracting temporal features.
+    2. Energy Network: Computes asset "Energy" from raw features.
+    3. Causal Attention Router: Cross-asset attention with:
+       - Soft Bias (Gravity): High-energy assets attract low-energy assets
+       - Hard Gating (Burnout): Weak interactions pruned
+    4. Output Head: MLP projecting to probabilities.
     
     Input Shape: (Batch, Sequence_Length, N_Assets, N_Features)
     Output Shape: (Batch, N_Assets, 1)
@@ -36,6 +191,7 @@ class GraphVisionary(nn.Module):
         hidden_dim: int = 64,
         n_heads: int = 4,
         dropout: float = 0.2,
+        attention_threshold: float = 0.01,
     ):
         super().__init__()
         self.n_features = n_features
@@ -51,16 +207,18 @@ class GraphVisionary(nn.Module):
             batch_first=True,
         )
         
-        # 2. Liquidity Router: Cross-Asset Attention
-        # Input: (Batch, N_Assets, Hidden_Dim)
-        self.attention = nn.MultiheadAttention(
+        # 2. Energy Network: Computes market activity scores
+        self.energy_net = EnergyNet(n_features=n_features, hidden_dim=32)
+        
+        # 3. Causal Attention Router: Cross-Asset Attention with Physics
+        self.attention = CausalAttention(
             embed_dim=hidden_dim,
-            num_heads=n_heads,
+            n_heads=n_heads,
             dropout=dropout,
-            batch_first=True,
+            threshold=attention_threshold,
         )
         
-        # 3. Output Head
+        # 4. Output Head
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
@@ -71,7 +229,7 @@ class GraphVisionary(nn.Module):
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass.
+        Forward pass with Causal Attention.
         
         Parameters
         ----------
@@ -85,6 +243,13 @@ class GraphVisionary(nn.Module):
         """
         batch_size, seq_len, n_assets, n_features = x.shape
         
+        # Extract features from last timestep for Energy calculation
+        # (B, S, N, F) -> (B, N, F)
+        last_timestep_features = x[:, -1, :, :]  # (B, N, F)
+        
+        # Compute Energy scores
+        energy = self.energy_net(last_timestep_features)  # (B, N, 1)
+        
         # Flatten Batch and Assets for Local Encoder
         # (B, S, N, F) -> (B * N, S, F)
         x_flat = x.permute(0, 2, 1, 3).reshape(batch_size * n_assets, seq_len, n_features)
@@ -97,16 +262,17 @@ class GraphVisionary(nn.Module):
         # last_hidden[0] is (B*N, H)
         local_embeddings = last_hidden[0].view(batch_size, n_assets, self.hidden_dim)
         
-        # Cross-Asset Attention (Liquidity Router)
+        # Causal Cross-Asset Attention with Energy-based Physics
         # Q = K = V = local_embeddings
         # attn_output: (B, N, H)
-        attn_output, _ = self.attention(
+        attn_output, attn_weights = self.attention(
             query=local_embeddings,
             key=local_embeddings,
             value=local_embeddings,
+            energy=energy,
         )
         
-        # Residual Connection + Norm (Optional but good practice, keeping simple for now as per spec)
+        # Residual Connection
         # Mixing local and global context
         mixed_embeddings = local_embeddings + attn_output
         
@@ -343,6 +509,7 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
             X_reshaped = X.reshape(batch_size, actual_seq_len, 1, inferred_features)
             X_tensor = torch.FloatTensor(X_reshaped).to(self.device)
         
+        
         self.model_.eval()
         with torch.no_grad():
             probs = self.model_(X_tensor).cpu().numpy() # (B, N, 1)
@@ -351,4 +518,5 @@ class TorchSklearnWrapper(BaseEstimator, ClassifierMixin):
         probs_flat = probs.reshape(-1, 1)
         return np.hstack([1.0 - probs_flat, probs_flat])
 
-__all__ = ["GraphVisionary", "TorchSklearnWrapper"]
+__all__ = ["EnergyNet", "CausalAttention", "GraphVisionary", "TorchSklearnWrapper"]
+

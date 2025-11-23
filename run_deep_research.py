@@ -195,6 +195,13 @@ def run_pipeline() -> None:
     # ------------------------------------------------------------------ #
     # 3. GLOBAL ASSEMBLY
     # ------------------------------------------------------------------ #
+    # NOTE: Current approach uses pd.concat to create a DataFrame.
+    # This is compatible with GraphVisionary's Global Mode via TorchSklearnWrapper.
+    # 
+    # FUTURE MIGRATION: Can replace with make_global_loader() to get a DataLoader
+    # that yields 4D tensors (Batch, Seq, Assets, Features) directly.
+    # See: src.data_loader.make_global_loader(TEMP_DIR, batch_size=32, sequence_length=16)
+    # ------------------------------------------------------------------ #
     print("\n[3] GLOBAL ASSEMBLY")
     dfs = []
     for f in generated_files:
@@ -211,6 +218,15 @@ def run_pipeline() -> None:
 
     # ------------------------------------------------------------------ #
     # 4. TRAINING
+    # ------------------------------------------------------------------ #
+    # NOTE: MoE Ensemble uses HybridTrendExpert, which internally uses GraphVisionary.
+    # The DataFrame X_train is automatically reshaped by TorchSklearnWrapper.fit():
+    #   - Detects if samples are divisible by n_assets (Global Mode)
+    #   - Reshapes (Batch*Assets, Seq*Features) -> (Batch, Seq, Assets, Features)
+    #   - Passes 4D tensor to GraphVisionary for cross-asset attention
+    # 
+    # Current shape: (N_Samples, N_Features) where N_Samples = Time * N_Assets
+    # GraphVisionary will reconstruct the temporal and asset dimensions internally.
     # ------------------------------------------------------------------ #
     print("\n[4] MIXED MODE TRAINING")
     

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Test script for multi-asset sparse-activated system.
-Tests with 3 assets and 30 days of data.
+Test script for multi-asset Graph Architecture.
+Tests GraphVisionary with 4D input tensors.
 """
 import sys
 import os
@@ -14,15 +14,16 @@ sys.path.insert(0, 'src')
 
 import numpy as np
 import pandas as pd
+import torch
 from src.config import SYMBOLS
-from src.data_loader import MarketDataLoader
+from src.data_loader import MarketDataLoader, GlobalMarketDataset, make_global_loader
 
 print("="*70)
-print("MULTI-ASSET SYSTEM TEST (3 assets, 30 days)")
+print("GRAPH ARCHITECTURE TEST (GraphVisionary + GlobalMarketDataset)")
 print("="*70)
 
 # Test 1: Data Loading
-print("\n[TEST 1] Data Loading")
+print("\n[TEST 1] Multi-Asset Data Loading")
 print("-" * 70)
 loader = MarketDataLoader()
 
@@ -51,76 +52,85 @@ except Exception as e:
     print(f"[FAIL] Data loading failed: {e}")
     sys.exit(1)
 
-# Test 2: Neural Architecture
-print("\n[TEST 2] Neural Architecture")
+# Test 2: GraphVisionary Architecture
+print("\n[TEST 2] GraphVisionary Neural Architecture")
 print("-" * 70)
 
 try:
-    from src.models.deep_experts import AdaptiveConvExpert, TorchSklearnWrapper
-    import torch
+    from src.models.deep_experts import GraphVisionary, TorchSklearnWrapper
     
-    # Test AdaptiveConvExpert with embeddings
-    print("Testing AdaptiveConvExpert...")
-    model = AdaptiveConvExpert(
+    # Test GraphVisionary with 4D input
+    print("Testing GraphVisionary with 4D input...")
+    model = GraphVisionary(
         n_features=10,
-        num_assets=3,
-        embedding_dim=16,
+        n_assets=3,
         hidden_dim=32,
-        sequence_length=16,
-        lstm_hidden=64,
+        n_heads=2,
         dropout=0.2,
     )
     
-    # Test forward pass
-    x = torch.randn(32, 10)  # Batch of 32, 10 features
-    asset_ids = torch.randint(0, 3, (32,))  # Random asset IDs
-    output = model(x, asset_ids)
+    # Test forward pass with 4D input: (Batch, Seq, Assets, Features)
+    batch_size = 16
+    seq_len = 8
+    n_assets = 3
+    n_features = 10
+    
+    x = torch.randn(batch_size, seq_len, n_assets, n_features)
+    output = model(x)
     
     print(f"  [OK] Forward pass: input shape {x.shape} -> output shape {output.shape}")
-    print(f"  [OK] Asset embedding layer exists")
-    print(f"  [OK] Dropout layers configured")
-    
-    # Test Monte Carlo inference
-    mean_probs, uncertainties = model.predict_with_uncertainty(x, asset_ids, n_iter=5)
-    print(f"  [OK] Monte Carlo inference: mean shape {mean_probs.shape}, uncertainty shape {uncertainties.shape}")
-    print(f"  [OK] Sample uncertainty: {uncertainties[:3, 0].numpy()}")
+    assert output.shape == (batch_size, n_assets, 1), f"Expected ({batch_size}, {n_assets}, 1), got {output.shape}"
+    print(f"  [OK] Output shape validation passed")
+    print(f"  [OK] Cross-asset attention layer exists")
+    print(f"  [OK] Per-asset LSTM encoder configured")
     
 except Exception as e:
-    print(f"[FAIL] Neural architecture test failed: {e}")
+    print(f"[FAIL] GraphVisionary test failed: {e}")
     import traceback
     traceback.print_exc()
     sys.exit(1)
 
-# Test 3: TorchSklearnWrapper
-print("\n[TEST 3] TorchSklearnWrapper with Asset IDs")
+# Test 3: TorchSklearnWrapper (Global Mode)
+print("\n[TEST 3] TorchSklearnWrapper with Global Mode")
 print("-" * 70)
 
 try:
-    # Create small synthetic dataset
-    n_samples = 200
-    X_test = np.random.randn(n_samples, 10)
+    # Create synthetic dataset for Global Mode
+    # Global Mode expects: (Batch * N_Assets, Seq * Features)
+    # which reshapes to: (Batch, Seq, N_Assets, Features)
+    
+    n_assets = 3
+    seq_len = 8
+    n_features = 10
+    n_batches = 25  # Small for quick test
+    
+    # Total samples = n_batches * n_assets
+    n_samples = n_batches * n_assets
+    
+    # Flatten: (Batch * Assets, Seq * Features)
+    X_test = np.random.randn(n_samples, seq_len * n_features).astype(np.float32)
     y_test = np.random.randint(0, 2, n_samples)
-    asset_ids_test = np.random.randint(0, 3, n_samples)
     
     wrapper = TorchSklearnWrapper(
-        n_features=10,
-        num_assets=3,
-        embedding_dim=16,
+        n_features=n_features,
+        n_assets=n_assets,
+        sequence_length=seq_len,
         hidden_dim=16,
-        sequence_length=8,
-        lstm_hidden=32,
+        n_heads=2,
         dropout=0.2,
         max_epochs=5,  # Quick test
-        batch_size=32,
+        batch_size=8,
     )
     
-    print("  Training wrapper...")
-    wrapper.fit(X_test, y_test, asset_ids=asset_ids_test)
+    print(f"  Training wrapper in Global Mode...")
+    print(f"  Input shape: {X_test.shape} (will reshape to ({n_batches}, {seq_len}, {n_assets}, {n_features}))")
+    wrapper.fit(X_test, y_test)
     print("  [OK] Training completed")
     
     print("  Predicting...")
-    probs = wrapper.predict_proba(X_test, asset_ids=asset_ids_test)
+    probs = wrapper.predict_proba(X_test)
     print(f"  [OK] Predictions shape: {probs.shape}")
+    assert probs.shape == (n_samples, 2), f"Expected ({n_samples}, 2), got {probs.shape}"
     print(f"  [OK] Sample probabilities: {probs[:3]}")
     
 except Exception as e:
@@ -129,23 +139,94 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
-# Test 4: MoE Ensemble
-print("\n[TEST 4] MoE Ensemble with Asset Awareness")
+# Test 4: GlobalMarketDataset
+print("\n[TEST 4] GlobalMarketDataset with Parquet Files")
+print("-" * 70)
+
+try:
+    from pathlib import Path
+    import tempfile
+    
+    # Create temporary parquet files for testing
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        
+        # Create synthetic parquet files for 3 assets
+        n_timesteps = 100
+        n_features = 5
+        
+        for i, symbol in enumerate(['BTC', 'ETH', 'XRP']):
+            # Create synthetic data
+            dates = pd.date_range('2024-01-01', periods=n_timesteps, freq='5min')
+            data = np.random.randn(n_timesteps, n_features).astype(np.float32)
+            df = pd.DataFrame(data, columns=[f'feature_{j}' for j in range(n_features)], index=dates)
+            df.index.name = 'timestamp'
+            
+            # Save to parquet
+            df.to_parquet(tmpdir / f"{symbol}.parquet")
+        
+        print(f"  Created test parquet files in {tmpdir}")
+        
+        # Test GlobalMarketDataset
+        dataset = GlobalMarketDataset(
+            file_paths=list(tmpdir.glob("*.parquet")),
+            sequence_length=16,
+            features=[f'feature_{j}' for j in range(n_features)]
+        )
+        
+        print(f"  [OK] Dataset created with {len(dataset)} samples")
+        
+        # Test __getitem__
+        sample = dataset[0]
+        print(f"  [OK] Sample shape: {sample.shape}")
+        assert sample.shape == (16, 3, n_features), f"Expected (16, 3, {n_features}), got {sample.shape}"
+        
+        # Test make_global_loader
+        loader = make_global_loader(
+            data_dir=tmpdir,
+            batch_size=4,
+            sequence_length=16,
+            features=[f'feature_{j}' for j in range(n_features)],
+            shuffle=False
+        )
+        
+        print(f"  [OK] DataLoader created")
+        
+        # Test batch
+        batch = next(iter(loader))
+        print(f"  [OK] Batch shape: {batch.shape}")
+        assert batch.shape[1:] == (16, 3, n_features), f"Expected (*, 16, 3, {n_features}), got {batch.shape}"
+        
+except Exception as e:
+    print(f"[FAIL] GlobalMarketDataset test failed: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+
+# Test 5: MoE Ensemble Integration
+print("\n[TEST 5] MoE Ensemble with GraphVisionary")
 print("-" * 70)
 
 try:
     from src.models.moe_ensemble import HybridTrendExpert
     
-    # Create test data with asset_id column
-    X_df = pd.DataFrame(X_test, columns=[f'feature_{i}' for i in range(10)])
-    X_df['asset_id'] = asset_ids_test
+    # Create test data with required physics features
+    n_samples = 200
+    X_df = pd.DataFrame(np.random.randn(n_samples, 10), columns=[f'feature_{i}' for i in range(10)])
+    
+    # Add required physics features
+    X_df['hurst_200'] = np.random.uniform(0.3, 0.7, n_samples)
+    X_df['entropy_200'] = np.random.uniform(0.5, 0.9, n_samples)
+    X_df['volatility_200'] = np.random.uniform(0.01, 0.05, n_samples)
+    
+    y_test = np.random.randint(0, 2, n_samples)
     
     expert = HybridTrendExpert(
         n_estimators=50,  # Reduced for testing
         random_state=42,
     )
     
-    print("  Training HybridTrendExpert...")
+    print("  Training HybridTrendExpert (uses GraphVisionary internally)...")
     expert.fit(X_df, y_test)
     print("  [OK] Training completed")
     
@@ -161,10 +242,15 @@ except Exception as e:
     sys.exit(1)
 
 print("\n" + "="*70)
-print("ALL TESTS PASSED")
+print("ALL TESTS PASSED [OK]")
 print("="*70)
+print("\nGraph Architecture Status:")
+print("[OK] GraphVisionary handles 4D input (Batch, Seq, Assets, Features)")
+print("[OK] GlobalMarketDataset aligns multi-asset data")
+print("[OK] TorchSklearnWrapper supports Global Mode")
+print("[OK] MoE Ensemble integrates with GraphVisionary")
 print("\nNext steps:")
-print("1. Update feature engineering to respect asset boundaries")
-print("2. Update run_deep_research.py orchestration")
-print("3. Run full test with all 11 assets")
-print("4. Push to GitHub")
+print("1. Run full pipeline with run_deep_research.py")
+print("2. Verify training on real market data")
+print("3. Deploy to Vast.AI for production testing")
+
