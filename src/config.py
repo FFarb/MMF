@@ -48,6 +48,12 @@ RANDOM_SEED = 42
 META_PROB_THRESHOLD = 0.65
 PRIMARY_RECALL_TARGET = 0.7
 
+# --- Alpha Council Feature Budget -------------------------------------------
+ALPHA_COUNCIL_MIN_FEATURES = 20
+ALPHA_COUNCIL_MAX_FEATURES = 80
+ALPHA_COUNCIL_FEATURE_PENALTY = 0.002  # expected Sharpe / expectancy gain needed per extra feature
+ALPHA_COUNCIL_ENABLE_DYNAMIC_BUDGET = True
+
 # --- Tensor-Flex Feature Refinement -----------------------------------------
 USE_TENSOR_FLEX = False
 TENSOR_FLEX_MAX_CLUSTER_SIZE = 64
@@ -60,6 +66,13 @@ TENSOR_FLEX_SELECTOR_COEF_THRESHOLD = 1e-4
 TENSOR_FLEX_SELECTOR_C = 0.1
 TENSOR_FLEX_ARTIFACTS_DIR = Path("artifacts/tensor_flex")
 TENSOR_FLEX_LOAD_IF_AVAILABLE = True
+
+# Tensor-Flex latent selection
+TENSOR_FLEX_MIN_LATENTS = 2
+TENSOR_FLEX_MAX_LATENTS = 8
+TENSOR_FLEX_VAR_EXPLAINED_MIN = 0.85  # cumulative variance threshold
+TENSOR_FLEX_SHARPE_DELTA_MIN = 0.02   # minimum Sharpe/expectancy delta needed per extra latent
+TENSOR_FLEX_ENABLE_DYNAMIC_LATENTS = True
 
 # --- Temporal CNN Expert -----------------------------------------------------
 CNN_USE = True
@@ -81,6 +94,18 @@ N_ASSETS = NUM_ASSETS      # Alias for consistency with new code
 EMBEDDING_DIM = 16         # Dimension of asset embeddings
 DROPOUT_RATE = 0.2         # Sparse activation dropout rate
 MC_ITERATIONS = 10         # Monte Carlo inference iterations for uncertainty
+
+# --- Training / Evaluation Protocol ------------------------------------------
+CV_NUM_FOLDS = 1        # 1 means "no CV, single split" (current behavior)
+CV_SCHEME = "expanding" # "expanding" or "rolling"
+BOOTSTRAP_TRIALS = 0    # 0 disables bootstrap, >0 enables
+BOOTSTRAP_SAMPLE_FRACTION = 0.7  # fraction of trades to sample with replacement
+MIN_TRADES_FOR_EVAL = 200         # minimum trades to consider a fold valid
+
+# --- Threshold Optimization Constraints --------------------------------------
+THRESHOLD_MIN_TRADES = 300   # minimum trades to consider a threshold viable
+THRESHOLD_MIN_RECALL = 0.03  # 3% recall minimum
+THRESHOLD_GRID = (0.20, 0.70, 0.02) # start, end, step
 
 # --- Visualization -----------------------------------------------------------
 PLOT_TEMPLATE = "plotly_dark"

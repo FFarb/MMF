@@ -196,7 +196,7 @@ class CNNExpert(BaseEstimator, ClassifierMixin):
 
         self.device_ = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_ = TemporalConvNet(
-            n_channels=windows.shape[1],
+            n_channels=windows.shape[1],  # Dynamically set from input windows [Batch, Channels, Length]
             mid_channels=self.mid_channels,
             dilations=self.dilations,
             dropout=self.dropout,

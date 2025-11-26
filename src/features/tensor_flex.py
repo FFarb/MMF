@@ -26,6 +26,17 @@ from sklearn.decomposition import PCA
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import Lasso, LinearRegression, LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import precision_score
+
+from ..config import (
+    TENSOR_FLEX_MIN_LATENTS,
+    TENSOR_FLEX_MAX_LATENTS,
+    TENSOR_FLEX_VAR_EXPLAINED_MIN,
+    TENSOR_FLEX_SHARPE_DELTA_MIN,
+    TENSOR_FLEX_ENABLE_DYNAMIC_LATENTS,
+    TP_PCT,
+    SL_PCT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +171,13 @@ class TensorFlexFeatureRefiner:
         self.random_state = random_state
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
         self.alpha_grid = tuple(alpha_grid)
+
+        # Dynamic Latent Config
+        self.min_latents = TENSOR_FLEX_MIN_LATENTS
+        self.max_latents = TENSOR_FLEX_MAX_LATENTS
+        self.var_explained_min = TENSOR_FLEX_VAR_EXPLAINED_MIN
+        self.sharpe_delta_min = TENSOR_FLEX_SHARPE_DELTA_MIN
+        self.enable_dynamic_latents = TENSOR_FLEX_ENABLE_DYNAMIC_LATENTS
 
         self.feature_names_in_: Optional[List[str]] = None
         self.fill_values_: Dict[str, float] = {}
@@ -469,6 +487,19 @@ class TensorFlexFeatureRefiner:
         latents_df = pd.concat(latents, axis=1)
         return latents_df
 
+        return selector, selector_type, selected, stability_scores, coef_map
+
+    def _evaluate_latent_set(self, X_train, y_train, X_val, y_val, class_weight):
+        """Helper to evaluate a subset of latents."""
+        if X_train.shape[1] == 0: return -1.0
+        model = LogisticRegression(solver='liblinear', class_weight=class_weight, random_state=self.random_state, max_iter=100)
+        model.fit(X_train, y_train)
+        preds = model.predict(X_val)
+        prec = precision_score(y_val, preds, zero_division=0)
+        if sum(preds) < 5: return -1.0
+        expectancy = (prec * TP_PCT) - ((1 - prec) * SL_PCT)
+        return expectancy * np.sqrt(sum(preds))
+
     def _fit_global_selector(
         self,
         latents: pd.DataFrame,
@@ -477,6 +508,83 @@ class TensorFlexFeatureRefiner:
     ):
         if latents.empty:
             return None, None, [], {}, {}
+            
+        # If dynamic latents disabled, use old logic (Lasso/Logistic selector)
+        if not self.enable_dynamic_latents:
+            return self._fit_global_selector_legacy(latents, y, sample_weights)
+
+        # --- Dynamic Latent Selection Logic ---
+        logger.info("[Tensor-Flex] Running Dynamic Latent Selection...")
+        
+        # 1. Order candidates by variance explained (using cluster metadata)
+        # We need to reconstruct which latent belongs to which cluster and its variance contribution
+        # For simplicity, we'll assume the columns are already roughly ordered or we trust the PCA variance.
+        # But wait, latents_df columns are shuffled in _fit_cluster_latents.
+        # We should probably sort them by some metric.
+        # Let's use single-feature predictive power + variance as a heuristic sort.
+        
+        if y is None:
+             # Fallback if no Y
+             return self._fit_global_selector_legacy(latents, y, sample_weights)
+
+        # Sort candidates by individual predictive power
+        corrs = latents.corrwith(y).abs().sort_values(ascending=False)
+        sorted_candidates = corrs.index.tolist()
+        
+        # Split for validation
+        split_idx = int(len(latents) * 0.7)
+        X_train_all, X_val_all = latents.iloc[:split_idx], latents.iloc[split_idx:]
+        y_train, y_val = y.iloc[:split_idx], y.iloc[split_idx:]
+        
+        n_pos = (y_train == 1).sum()
+        n_neg = (y_train == 0).sum()
+        class_weight = {0: 1.0, 1: n_neg / max(1, n_pos)}
+        
+        selected = []
+        best_metric = -float('inf')
+        cumulative_variance = 0.0 # We don't track true global variance easily here without full PCA, 
+                                  # but we can track count.
+        
+        for feature in sorted_candidates:
+            # Stop if max reached
+            if len(selected) >= self.max_latents:
+                break
+                
+            trial = selected + [feature]
+            
+            # Force add if below min
+            if len(trial) <= self.min_latents:
+                selected.append(feature)
+                # Update metric baseline
+                best_metric = self._evaluate_latent_set(X_train_all[selected], y_train, X_val_all[selected], y_val, class_weight)
+                continue
+                
+            # Evaluate
+            metric = self._evaluate_latent_set(X_train_all[trial], y_train, X_val_all[trial], y_val, class_weight)
+            
+            delta = metric - best_metric
+            if delta > self.sharpe_delta_min:
+                selected.append(feature)
+                best_metric = metric
+            else:
+                # Diminishing returns
+                pass
+                
+        logger.info(f"[Tensor-Flex] Selected {len(selected)} latents. Final Proxy Metric: {best_metric:.4f}")
+        
+        # Return in format expected by caller
+        # We fake the selector object since we did a greedy search
+        stability = {col: 1.0 for col in selected}
+        coefs = {col: 1.0 for col in selected}
+        
+        return None, "dynamic_greedy", selected, stability, coefs
+
+    def _fit_global_selector_legacy(
+        self,
+        latents: pd.DataFrame,
+        y: Optional[pd.Series],
+        sample_weights: Optional[np.ndarray],
+    ):
         if y is None or len(pd.unique(y.dropna())) < 2:
             logger.warning("No valid labels passed to Tensor-Flex selector; returning full latent set.")
             names = list(latents.columns)

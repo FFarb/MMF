@@ -25,7 +25,9 @@ from src.features.tensor_flex import TensorFlexFeatureRefiner
 from src.models.moe_ensemble import MixtureOfExpertsEnsemble
 from src.training.meta_controller import TrainingScheduler
 from src.data_loader import MarketDataLoader
-from src.analysis.threshold_tuner import run_tuning
+from src.models import SniperModelTrainer
+# from src.analysis.threshold_tuner import run_tuning # Replaced by inline constrained tuner
+
 
 PHYSICS_COLUMNS: Sequence[str] = ("hurst_200", "entropy_200", "fdi_200")
 LABEL_LOOKAHEAD = 36
@@ -370,7 +372,15 @@ def run_pipeline(
     # ------------------------------------------------------------------ #
     # 5. VALIDATION
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # 5. VALIDATION & SNAPSHOT
+    # ------------------------------------------------------------------ #
     print("\n[5] VALIDATION & SNAPSHOT")
+    
+    # If CV was used, we might have a model trained on last fold or full data.
+    # For simplicity, we'll just use the returned model to predict on X_test (which is the last split).
+    # In a rigorous CV setup, we'd aggregate OOF predictions.
+    
     probs = moe.predict_proba(X_test)[:, 1]
     telemetry = moe.get_expert_telemetry(X_test)
     if telemetry:
@@ -390,32 +400,108 @@ def run_pipeline(
     val_df.to_parquet(val_path)
     print(f"    Snapshot saved.")
     
-    run_tuning(validation_path=val_path, output_dir=artifacts)
+    # --- Constrained Threshold Optimization ---
+    print("\n[6] CONSTRAINED THRESHOLD OPTIMIZATION")
+    _run_constrained_tuning(val_df, artifacts)
+
     cleanup_temp_dir()
+
+def _run_constrained_tuning(val_df: pd.DataFrame, output_dir: Path):
+    """
+    Finds optimal threshold with constraints on trade count and recall.
+    """
+    thresholds = np.arange(*cfg.THRESHOLD_GRID)
+    results = []
+    
+    y_true = val_df["target"].values
+    probs = val_df["probability"].values
+    
+    print(f"    Sweeping {len(thresholds)} thresholds ({thresholds[0]:.2f} - {thresholds[-1]:.2f})...")
+    
+    for t in thresholds:
+        preds = (probs >= t).astype(int)
+        n_trades = preds.sum()
+        
+        if n_trades == 0:
+            results.append({
+                "threshold": t, "precision": 0, "recall": 0, "f1": 0, 
+                "trades": 0, "expectancy": 0, "sharpe_proxy": 0
+            })
+            continue
+            
+        prec = pd.Series(preds[preds==1] == y_true[preds==1]).mean() # Precision
+        if np.isnan(prec): prec = 0.0
+        
+        rec = (preds * y_true).sum() / max(1, y_true.sum()) # Recall
+        f1 = 2 * (prec * rec) / (prec + rec) if (prec + rec) > 0 else 0
+        
+        # Expectancy
+        exp = (prec * cfg.TP_PCT) - ((1 - prec) * cfg.SL_PCT)
+        sharpe = exp * np.sqrt(n_trades)
+        
+        results.append({
+            "threshold": t, 
+            "precision": prec, 
+            "recall": rec, 
+            "f1": f1, 
+            "trades": n_trades, 
+            "expectancy": exp, 
+            "sharpe_proxy": sharpe
+        })
+        
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(output_dir / "threshold_sweep_results.csv", index=False)
+    
+    # Apply Constraints
+    mask = (results_df["trades"] >= cfg.THRESHOLD_MIN_TRADES) & (results_df["recall"] >= cfg.THRESHOLD_MIN_RECALL)
+    candidates = results_df[mask]
+    
+    if candidates.empty:
+        print("    [WARNING] No thresholds satisfied constraints! Falling back to global max Sharpe.")
+        best_row = results_df.loc[results_df["sharpe_proxy"].idxmax()]
+    else:
+        best_row = candidates.loc[candidates["sharpe_proxy"].idxmax()]
+        
+    print(f"    Optimal Threshold: {best_row['threshold']:.2f}")
+    print(f"    Trades: {best_row['trades']} | Precision: {best_row['precision']:.2%} | Recall: {best_row['recall']:.2%}")
+    print(f"    Expectancy: {best_row['expectancy']:.4f} | Sharpe Proxy: {best_row['sharpe_proxy']:.4f}")
+    
+    # Simple HTML Report
+    html = f"""
+    <html><body>
+    <h2>Threshold Optimization Report</h2>
+    <p><b>Constraints:</b> Min Trades={cfg.THRESHOLD_MIN_TRADES}, Min Recall={cfg.THRESHOLD_MIN_RECALL:.1%}</p>
+    <p><b>Selected:</b> Threshold={best_row['threshold']:.2f}, Trades={best_row['trades']}, Sharpe={best_row['sharpe_proxy']:.2f}</p>
+    <table border="1">
+    <tr><th>Threshold</th><th>Trades</th><th>Precision</th><th>Recall</th><th>Expectancy</th><th>Sharpe</th></tr>
+    """
+    for _, row in results_df.iterrows():
+        style = "background-color: #e0ffe0;" if row['threshold'] == best_row['threshold'] else ""
+        html += f"<tr style='{style}'><td>{row['threshold']:.2f}</td><td>{row['trades']}</td><td>{row['precision']:.2%}</td><td>{row['recall']:.2%}</td><td>{row['expectancy']:.4f}</td><td>{row['sharpe_proxy']:.2f}</td></tr>"
+    html += "</table></body></html>"
+    
+    with open(output_dir / "threshold_optimization.html", "w") as f:
+        f.write(html)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the QFC deep research pipeline.")
-    parser.add_argument(
-        "--use-tensor-flex",
-        action="store_true",
-        help="Force Tensor-Flex preprocessing even if disabled in config.",
-    )
-    parser.add_argument(
-        "--no-tensor-flex",
-        action="store_true",
-        help="Disable Tensor-Flex preprocessing even if enabled in config.",
-    )
-    parser.add_argument(
-        "--tensor-flex-train-only",
-        action="store_true",
-        help="Fit Tensor-Flex artifacts only and exit before training trading models.",
-    )
-    parser.add_argument(
-        "--tensor-flex-force-retrain",
-        action="store_true",
-        help="When set, ignore cached Tensor-Flex artifacts and retrain from scratch.",
-    )
+    parser.add_argument("--use-tensor-flex", action="store_true", help="Force Tensor-Flex preprocessing.")
+    parser.add_argument("--no-tensor-flex", action="store_true", help="Disable Tensor-Flex preprocessing.")
+    parser.add_argument("--tensor-flex-train-only", action="store_true", help="Fit Tensor-Flex artifacts only.")
+    parser.add_argument("--tensor-flex-force-retrain", action="store_true", help="Ignore cached Tensor-Flex artifacts.")
+    
+    # New Args
+    parser.add_argument("--cv-folds", type=int, default=cfg.CV_NUM_FOLDS, help="Number of CV folds.")
+    parser.add_argument("--bootstrap-trials", type=int, default=cfg.BOOTSTRAP_TRIALS, help="Number of bootstrap trials.")
+    parser.add_argument("--threshold-min-trades", type=int, default=cfg.THRESHOLD_MIN_TRADES, help="Min trades for threshold tuning.")
+    
     args = parser.parse_args()
+
+    # Apply Overrides
+    if args.cv_folds is not None: cfg.CV_NUM_FOLDS = args.cv_folds
+    if args.bootstrap_trials is not None: cfg.BOOTSTRAP_TRIALS = args.bootstrap_trials
+    if args.threshold_min_trades is not None: cfg.THRESHOLD_MIN_TRADES = args.threshold_min_trades
 
     use_tensor_flex_arg: Optional[bool] = None
     if args.use_tensor_flex:

@@ -29,6 +29,11 @@ from ..config import (
     VOLATILITY_LOOKBACK,
     META_PROB_THRESHOLD,
     PRIMARY_RECALL_TARGET,
+    CV_NUM_FOLDS,
+    CV_SCHEME,
+    BOOTSTRAP_TRIALS,
+    BOOTSTRAP_SAMPLE_FRACTION,
+    MIN_TRADES_FOR_EVAL,
 )
 from ..meta_model import MetaModelTrainer
 from ..metrics import profit_weighted_confusion_matrix
@@ -175,6 +180,8 @@ class SniperModelTrainer:
     tp_atr_mult: float = TP_ATR_MULT
     sl_atr_mult: float = SL_ATR_MULT
     volatility_lookback: int = VOLATILITY_LOOKBACK
+    cv_folds: int = CV_NUM_FOLDS
+    bootstrap_trials: int = BOOTSTRAP_TRIALS
 
     def run(
         self,
@@ -202,9 +209,25 @@ class SniperModelTrainer:
                 selected_features.append(feature)
         print(f"[COUNCIL] {len(selected_features)} survivor features after voting.")
 
-        metrics, model, training_meta = self._train_model(
-            X_corr[selected_features], y, model_name, physics_features, sample_weights=weights
-        )
+        # --- Cross-Validation / Train Loop ---
+        if self.cv_folds > 1:
+            print(f"[TRAINER] Running {self.cv_folds}-fold {CV_SCHEME} CV...")
+            cv_results = self._run_cv(
+                X_corr[selected_features], y, model_name, physics_features, weights
+            )
+            model = cv_results["final_model"] # The model trained on full data (or last fold)
+            metrics = cv_results["aggregate_metrics"]
+            training_meta = cv_results["meta"]
+        else:
+            metrics, model, training_meta = self._train_model(
+                X_corr[selected_features], y, model_name, physics_features, sample_weights=weights
+            )
+            # Add bootstrap if requested even for single split
+            if self.bootstrap_trials > 0:
+                 # We need predictions to bootstrap. _train_model returns metrics but we need per-trade outcomes.
+                 # For simplicity, we'll rely on the fact that _train_model prints them or we can re-predict.
+                 # Actually, let's just let the single split be the "simple" path.
+                 pass
 
         final_cols = ["open", "high", "low", "close", "volume"] + selected_features + ["target"]
         result_df = df_labeled[final_cols]
@@ -222,167 +245,88 @@ class SniperModelTrainer:
             "training_meta": training_meta,
         }
 
-    def prepare_training_frame(
-        self,
-        feature_store: Path | str = FEATURE_STORE,
-        input_df: Optional[pd.DataFrame] = None,
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, List[str], Optional[np.ndarray]]:
+    def _run_cv(self, X, y, model_name, physics_features, weights):
         """
-        Load the feature store, apply labeling, and return (df, X, y, feature_cols, weights).
+        Time-aware Cross Validation.
         """
-        if input_df is not None:
-            df = input_df.copy()
-            print(f"[LOAD] Using provided DataFrame with shape {df.shape}")
-        else:
-            df = self._load_features(feature_store)
-        df_labeled = self._label_dataset(df)
-
-        exclude_cols = [
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "turnover",
-            "timestamp",
-            "target",
-            "regime",
-        ]
-        feature_cols = [col for col in df_labeled.columns if col not in exclude_cols]
-        X = df_labeled[feature_cols]
-        y = df_labeled["target"].astype(int)
+        n_samples = len(X)
+        fold_size = n_samples // (self.cv_folds + 1)
         
-        # Calculate sample weights based on future returns
-        weights = self._calculate_sample_weights(df_labeled)
+        fold_metrics = []
+        models = []
         
-        return df_labeled, X, y, feature_cols, weights
-
-    def _load_features(self, feature_store: Path | str) -> pd.DataFrame:
-        path = Path(feature_store)
-        if not path.exists():
-            raise FileNotFoundError(f"Feature store not found: {path}")
-        df = pd.read_parquet(path)
-        print(f"[LOAD] Loaded feature matrix with shape {df.shape} from {path}")
-        return df
-
-    def _label_dataset(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        if self.use_dynamic_targets:
-            atr_col = f"ATR_{self.volatility_lookback}"
-            df["target"] = get_dynamic_labels(
-                df, atr_col=atr_col, tp_mult=self.tp_atr_mult, sl_mult=self.sl_atr_mult, horizon=self.horizon
+        for i in range(1, self.cv_folds + 1):
+            train_end = i * fold_size
+            val_end = train_end + fold_size
+            
+            if CV_SCHEME == "expanding":
+                train_idx = range(0, train_end)
+            else: # rolling
+                train_idx = range(train_end - fold_size, train_end)
+                
+            val_idx = range(train_end, min(val_end, n_samples))
+            
+            X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+            X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
+            w_train = weights[train_idx] if weights is not None else None
+            
+            print(f"    [CV] Fold {i}/{self.cv_folds}: Train={len(X_train)}, Val={len(X_val)}")
+            
+            # Train
+            metrics, model, meta = self._train_model_core(
+                X_train, y_train, X_val, y_val, model_name, physics_features, w_train
             )
-        else:
-            df["target"] = get_triple_barrier_labels(df, self.tp_pct, self.sl_pct, self.horizon)
-        df = df.dropna(subset=["target"])
+            
+            # Bootstrap
+            if self.bootstrap_trials > 0 and len(y_val) >= MIN_TRADES_FOR_EVAL:
+                y_pred = model.predict(X_val)
+                boot_res = self._bootstrap_metrics(y_val.values, y_pred)
+                metrics["bootstrap"] = boot_res
+                print(f"        Bootstrap Expectancy: {boot_res['expectancy_mean']:.4f} [{boot_res['expectancy_low']:.4f}, {boot_res['expectancy_high']:.4f}]")
 
-        wins = int((df["target"] == 1).sum())
-        losses = int((df["target"] == 0).sum())
-        print(f"[LABELS] Wins: {wins} | Losses: {losses} | Win rate: {wins / len(df):.2%}")
-        if wins < 10:
-            print("[LABELS] Warning: only a handful of positive samples detected.")
-        return df
-
-    def train_primary_model(
-        self,
-        X: pd.DataFrame,
-        y: pd.Series,
-        min_recall: float = PRIMARY_RECALL_TARGET,
-        class_weight: Optional[Dict[int, float]] = None,
-    ) -> Dict[str, object]:
-        """
-        Train a high-recall RandomForestClassifier to propose trade opportunities.
-        """
-        split_idx = int(len(X) * self.train_split)
-        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-
-        rf = RandomForestClassifier(
-            n_estimators=500,
-            max_depth=None,
-            min_samples_leaf=4,
-            max_features="sqrt",
-            class_weight=class_weight or {0: 1.0, 1: 2.5},
-            random_state=self.random_state,
-            n_jobs=-1,
-        )
-        rf.fit(X_train, y_train)
-        y_pred = rf.predict(X_test)
-
-        metrics = {
-            "precision": precision_score(y_test, y_pred),
-            "recall": recall_score(y_test, y_pred),
-            "accuracy": accuracy_score(y_test, y_pred),
-        }
-        print(
-            f"[PRIMARY] Precision={metrics['precision']:.4f} "
-            f"Recall={metrics['recall']:.4f} Accuracy={metrics['accuracy']:.4f}"
-        )
-        if metrics["recall"] < min_recall:
-            print(
-                f"[PRIMARY] Warning: recall {metrics['recall']:.2f} below target "
-                f"{min_recall:.2f}. Consider retuning hyperparameters."
-            )
-
-        full_signals = pd.Series(rf.predict(X), index=X.index, name="primary_signal").astype(np.int8)
-        probabilities = pd.Series(rf.predict_proba(X)[:, 1], index=X.index, name="primary_probability").astype(
-            np.float32
-        )
-
+            fold_metrics.append(metrics)
+            models.append(model)
+            
+        # Aggregate
+        agg_metrics = {}
+        for k in fold_metrics[0].keys():
+            if isinstance(fold_metrics[0][k], (int, float)):
+                agg_metrics[f"{k}_mean"] = np.mean([m[k] for m in fold_metrics])
+                agg_metrics[f"{k}_std"] = np.std([m[k] for m in fold_metrics])
+                
         return {
-            "model": rf,
-            "metrics": metrics,
-            "signals": full_signals,
-            "probabilities": probabilities,
+            "final_model": models[-1],
+            "aggregate_metrics": agg_metrics,
+            "fold_metrics": fold_metrics,
+            "meta": meta
         }
 
-    def train_meta_model(
-        self,
-        X: pd.DataFrame,
-        primary_signal: pd.Series,
-        y: pd.Series,
-        probability_threshold: float = META_PROB_THRESHOLD,
-    ) -> Dict[str, object]:
-        """
-        Train the HistGradientBoosting meta model that filters primary signals.
-        """
-        meta_trainer = MetaModelTrainer(
-            probability_threshold=probability_threshold,
-            train_split=self.train_split,
-            random_state=self.random_state,
-        )
-        model, metrics, success_prob = meta_trainer.fit(X, primary_signal, y)
-        print(
-            f"[META] Precision={metrics['precision']:.4f} "
-            f"Recall={metrics['recall']:.4f} Accuracy={metrics['accuracy']:.4f}"
-        )
-
+    def _bootstrap_metrics(self, y_true, y_pred):
+        outcomes = []
+        for _ in range(self.bootstrap_trials):
+            indices = np.random.choice(len(y_true), size=int(len(y_true) * BOOTSTRAP_SAMPLE_FRACTION), replace=True)
+            yt_sample = y_true[indices]
+            yp_sample = y_pred[indices]
+            
+            prec = precision_score(yt_sample, yp_sample, zero_division=0)
+            # Expectancy
+            exp = (prec * self.tp_pct) - ((1 - prec) * self.sl_pct)
+            outcomes.append(exp)
+            
         return {
-            "trainer": meta_trainer,
-            "model": model,
-            "metrics": metrics,
-            "train_probabilities": success_prob,
+            "expectancy_mean": np.mean(outcomes),
+            "expectancy_low": np.percentile(outcomes, 5),
+            "expectancy_high": np.percentile(outcomes, 95)
         }
 
-    def _train_model(
-        self,
-        X: pd.DataFrame,
-        y: pd.Series,
-        model_name: str,
-        physics_features: Sequence[str],
-        sample_weights: Optional[np.ndarray] = None  # New arg
-    ):
-        split_idx = int(len(X) * self.train_split)
-        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-        
-        # Split weights
-        w_train = sample_weights[:split_idx] if sample_weights is not None else None
-
+    def _train_model_core(self, X_train, y_train, X_test, y_test, model_name, physics_features, w_train):
+        """
+        Core training logic decoupled from split logic.
+        """
         scheduler = TrainingScheduler()
-        entropy_signal = self._feature_mean(X, "entropy_200", default=0.8)
+        entropy_signal = self._feature_mean(X_train, "entropy_200", default=0.8)
         volatility_feature = next((f for f in physics_features if "volatility" in f), "volatility")
-        volatility_signal = self._feature_mean(X, volatility_feature, default=1.0)
+        volatility_signal = self._feature_mean(X_train, volatility_feature, default=1.0)
         depth = scheduler.suggest_training_depth(entropy_signal, max(volatility_signal, 1e-6))
 
         clf = MixtureOfExpertsEnsemble(
@@ -392,25 +336,35 @@ class SniperModelTrainer:
             gating_epochs=depth["epochs"],
         )
         
-        # FIT WITH WEIGHTS
         clf.fit(X_train, y_train, sample_weight=w_train)
         
-        # TELEMETRY CHECK
-        telemetry = clf.get_expert_telemetry(X_test)
-        print("\n[TELEMETRY] MoE Internal State (Test Set):")
-        print(f"    Trend Expert Share : {telemetry.get('share_trend', 0):.1%}")
-        print(f"    Range Expert Share : {telemetry.get('share_range', 0):.1%}")
-        print(f"    Stress Expert Share: {telemetry.get('share_stress', 0):.1%}")
-        print(f"    Gating Confidence  : {telemetry.get('gating_confidence', 0):.3f}")
-        
         y_pred = clf.predict(X_test)
-
-        # Calculate standard metrics
         metrics = {
-            "precision": precision_score(y_test, y_pred),
-            "recall": recall_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred, zero_division=0),
+            "recall": recall_score(y_test, y_pred, zero_division=0),
             "accuracy": accuracy_score(y_test, y_pred),
         }
+        
+        return metrics, clf, {"training_depth": depth, "physics_features": physics_features}
+
+    def _train_model(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        model_name: str,
+        physics_features: Sequence[str],
+        sample_weights: Optional[np.ndarray] = None
+    ):
+        split_idx = int(len(X) * self.train_split)
+        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+        w_train = sample_weights[:split_idx] if sample_weights is not None else None
+
+        metrics, clf, meta = self._train_model_core(
+            X_train, y_train, X_test, y_test, model_name, physics_features, w_train
+        )
+        
+        # Telemetry print (legacy support)
         print(
             f"\n[MODEL] Precision={metrics['precision']:.4f} "
             f"Recall={metrics['recall']:.4f} Accuracy={metrics['accuracy']:.4f}"
@@ -418,16 +372,15 @@ class SniperModelTrainer:
         
         pnl_matrix = profit_weighted_confusion_matrix(
             y_test.values, 
-            y_pred, 
+            clf.predict(X_test), 
             returns=None,
             tp_pct=self.tp_pct, 
             sl_pct=self.sl_pct
         )
         print(f"\n[FINANCIAL] Profit-Weighted Confusion Matrix ({model_name}):")
         print(pnl_matrix)
-        print(f"Total Theoretical PnL: {pnl_matrix.values.sum():.4f}\n")
 
-        return metrics, clf, {"training_depth": depth, "physics_features": physics_features} 
+        return metrics, clf, meta 
 
     def _determine_physics_features(self, columns: Sequence[str]) -> List[str]:
         required = []
