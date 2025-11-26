@@ -77,6 +77,10 @@ def _load_or_fit_tensor_flex(
         selector_c=cfg.TENSOR_FLEX_SELECTOR_C,
         random_state=cfg.TENSOR_FLEX_RANDOM_STATE,
         artifacts_dir=artifacts_dir,
+        supervised_weight=cfg.TENSOR_FLEX_SUPERVISED_WEIGHT,
+        corr_threshold=cfg.TENSOR_FLEX_CORR_THRESHOLD,
+        min_latents=cfg.TENSOR_FLEX_MIN_LATENTS,
+        max_latents=cfg.TENSOR_FLEX_MAX_LATENTS,
     )
     refiner.fit(X_train, y_train)
     print(f"[Tensor-Flex] Trained refiner with {len(refiner.selected_feature_names_)} distilled features.")
@@ -94,7 +98,8 @@ def get_smart_data(loader: MarketDataLoader, symbol: str, interval: str, days: i
         df = loader.get_data(days_back=days)
         return df
     except Exception as e:
-        print(f"       [WARNING] Could not fetch {symbol} {interval}: {e}")
+        safe_msg = str(e).encode('ascii', 'replace').decode('ascii')
+        print(f"       [WARNING] Could not fetch {symbol} {interval}: {safe_msg}")
         return pd.DataFrame()
 
 def process_single_asset(symbol: str, asset_idx: int, loader: MarketDataLoader, factory: SignalFactory) -> Optional[pd.DataFrame]:
@@ -146,7 +151,8 @@ def process_single_asset(symbol: str, asset_idx: int, loader: MarketDataLoader, 
         return df_merged
         
     except Exception as e:
-        print(f"       [ERROR] {symbol}: {e}")
+        safe_msg = str(e).encode('ascii', 'replace').decode('ascii')
+        print(f"       [ERROR] {symbol}: {safe_msg}")
         return None
 
 def run_pipeline(
@@ -232,7 +238,7 @@ def run_pipeline(
                 print(f"       -> Saved filtered shard: {save_path}")
                 
             except Exception as e:
-                print(f"       [ERROR] Saving shard {symbol}: {e}")
+                print(f"       [ERROR] Saving shard {symbol}: {repr(e)}")
         
         del df_asset
         gc.collect()
@@ -253,7 +259,7 @@ def run_pipeline(
         try:
             dfs.append(pd.read_parquet(f))
         except Exception as e:
-            print(f"    [WARN] Corrupt shard {f}: {e}")
+            print(f"    [WARN] Corrupt shard {f}: {repr(e)}")
 
     if not dfs:
         return
@@ -496,12 +502,26 @@ if __name__ == "__main__":
     parser.add_argument("--bootstrap-trials", type=int, default=cfg.BOOTSTRAP_TRIALS, help="Number of bootstrap trials.")
     parser.add_argument("--threshold-min-trades", type=int, default=cfg.THRESHOLD_MIN_TRADES, help="Min trades for threshold tuning.")
     
+    # Tensor-Flex v2 Args
+    parser.add_argument("--tensor-flex-mode", type=str, default=cfg.TENSOR_FLEX_MODE, help="Tensor-Flex mode (v1 or v2).")
+    parser.add_argument("--tensor-flex-min-latents", type=int, default=cfg.TENSOR_FLEX_MIN_LATENTS, help="Min latents.")
+    parser.add_argument("--tensor-flex-max-latents", type=int, default=cfg.TENSOR_FLEX_MAX_LATENTS, help="Max latents.")
+    parser.add_argument("--tensor-flex-corr-threshold", type=float, default=cfg.TENSOR_FLEX_CORR_THRESHOLD, help="Correlation threshold for clustering.")
+    parser.add_argument("--tensor-flex-supervised-weight", type=float, default=cfg.TENSOR_FLEX_SUPERVISED_WEIGHT, help="Weight for supervised score in latent selection.")
+    
     args = parser.parse_args()
 
     # Apply Overrides
     if args.cv_folds is not None: cfg.CV_NUM_FOLDS = args.cv_folds
     if args.bootstrap_trials is not None: cfg.BOOTSTRAP_TRIALS = args.bootstrap_trials
     if args.threshold_min_trades is not None: cfg.THRESHOLD_MIN_TRADES = args.threshold_min_trades
+
+    # Tensor-Flex Overrides
+    if args.tensor_flex_mode: cfg.TENSOR_FLEX_MODE = args.tensor_flex_mode
+    if args.tensor_flex_min_latents: cfg.TENSOR_FLEX_MIN_LATENTS = args.tensor_flex_min_latents
+    if args.tensor_flex_max_latents: cfg.TENSOR_FLEX_MAX_LATENTS = args.tensor_flex_max_latents
+    if args.tensor_flex_corr_threshold: cfg.TENSOR_FLEX_CORR_THRESHOLD = args.tensor_flex_corr_threshold
+    if args.tensor_flex_supervised_weight: cfg.TENSOR_FLEX_SUPERVISED_WEIGHT = args.tensor_flex_supervised_weight
 
     use_tensor_flex_arg: Optional[bool] = None
     if args.use_tensor_flex:

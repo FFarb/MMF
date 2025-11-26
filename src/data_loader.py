@@ -192,10 +192,10 @@ class MarketDataLoader:
         start_time = start_time or (end_time - timedelta(days=days_back))
 
         print(f"\n[DATA] Fetching {self.symbol} @ {self.interval}m")
-        print(f"       Window: {start_time} -> {end_time}")
+        print(f"       Window: {start_time} to {end_time}")
 
         if force_refresh or not self.cache_file.exists():
-            print("       Cache miss or forced refresh -> fetching full range...")
+            print("       Cache miss or forced refresh to fetching full range...")
             fresh = self._fetch_data(int(start_time.timestamp() * 1000), int(end_time.timestamp() * 1000))
             self._write_cache(fresh)
             return self._filter_range(fresh, start_time, end_time)
@@ -204,7 +204,7 @@ class MarketDataLoader:
         cache_start = cached_df.index[0].to_pydatetime()
         cache_end = cached_df.index[-1].to_pydatetime()
 
-        print(f"       Cache range: {cache_start} -> {cache_end}")
+        print(f"       Cache range: {cache_start} to {cache_end}")
 
         frames = [cached_df]
         cache_updated = False
@@ -311,7 +311,7 @@ class MarketDataLoader:
                 df["asset_id"] = asset_id
                 df["symbol"] = symbol
                 frames.append(df)
-                print(f"      ✓ Collected {len(df)} candles for {symbol}")
+                print(f"      [OK] Collected {len(df)} candles for {symbol}")
             except Exception as exc:
                 print(f"      ERROR fetching {symbol}: {exc}")
                 continue
@@ -365,7 +365,8 @@ class MarketDataLoader:
                     limit=1000,
                 )
             except Exception as exc:
-                print(f"       [ERROR] Fetch error: {exc}")
+                safe_msg = str(exc).encode('ascii', 'replace').decode('ascii')
+                print(f"       [ERROR] Fetch error: {safe_msg}")
                 break
 
             if response["retCode"] != 0:

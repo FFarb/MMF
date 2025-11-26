@@ -34,6 +34,9 @@ from ..config import (
     TENSOR_FLEX_VAR_EXPLAINED_MIN,
     TENSOR_FLEX_SHARPE_DELTA_MIN,
     TENSOR_FLEX_ENABLE_DYNAMIC_LATENTS,
+    TENSOR_FLEX_SUPERVISED_WEIGHT,
+    TENSOR_FLEX_CORR_THRESHOLD,
+    TENSOR_FLEX_MODE,
     TP_PCT,
     SL_PCT,
 )
@@ -67,14 +70,13 @@ def _mean_abs_corr(matrix: np.ndarray) -> float:
 def cluster_features(
     X: pd.DataFrame,
     max_cluster_size: int = 64,
-    method: str = "corr_mi",
+    corr_threshold: float = 0.85,
     random_state: int = 42,
 ) -> List[List[str]]:
     """
     Cluster feature names into correlation-based groups.
+    Uses recursive splitting to ensure no cluster exceeds max_cluster_size.
     """
-    del method  # Plain correlation clustering for v1.
-
     df = _ensure_dataframe(X)
     numeric_df = df.select_dtypes(include=["number"]).copy()
     numeric_df = numeric_df.replace([np.inf, -np.inf], np.nan)
@@ -83,54 +85,80 @@ def cluster_features(
     usable_cols = [col for col in numeric_df.columns if variances.get(col, 0.0) > 0]
     zero_var_cols = [col for col in numeric_df.columns if col not in usable_cols]
 
-    if usable_cols:
-        numeric_df = numeric_df[usable_cols]
-    else:
-        # Fall back to singleton clusters for zero variance columns.
+    if not usable_cols:
         return [[col] for col in zero_var_cols]
 
-    corr = numeric_df.corr().fillna(0.0).abs()
+    # Initial Clustering
+    clusters = _recursive_cluster(
+        numeric_df[usable_cols],
+        max_size=max_cluster_size,
+        corr_threshold=corr_threshold,
+        random_state=random_state
+    )
+
+    # Append zero variance features as singletons
+    for col in zero_var_cols:
+        clusters.append([col])
+
+    return clusters
+
+
+def _recursive_cluster(
+    df: pd.DataFrame,
+    max_size: int,
+    corr_threshold: float,
+    random_state: int
+) -> List[List[str]]:
+    """
+    Recursively split clusters until they fit within max_size.
+    """
+    n_features = df.shape[1]
+    cols = list(df.columns)
+    
+    # Base case: small enough
+    if n_features <= max_size:
+        return [cols]
+
+    # Compute correlation matrix
+    corr = df.corr().fillna(0.0).abs()
     dist_matrix = 1.0 - corr.to_numpy(copy=True)
     np.fill_diagonal(dist_matrix, 0.0)
 
-    n_features = corr.shape[0]
-    if n_features == 1:
-        clusters = [[usable_cols[0]]]
-    else:
-        approx_clusters = max(1, int(np.ceil(n_features / max_cluster_size)))
-        try:
-            clustering = AgglomerativeClustering(
-                n_clusters=approx_clusters,
-                metric="precomputed",
-                linkage="average",
-            )
-        except TypeError:
-            clustering = AgglomerativeClustering(
-                n_clusters=approx_clusters,
-                affinity="precomputed",
-                linkage="average",
-            )
-        labels = clustering.fit_predict(dist_matrix)
-        clusters = []
-        for label in np.unique(labels):
-            members = corr.columns[labels == label].tolist()
-            clusters.append(members)
-
-    rng = np.random.default_rng(random_state)
-    final_clusters: List[List[str]] = []
-    for members in clusters:
-        if len(members) <= max_cluster_size:
-            final_clusters.append(members)
+    # Determine split count (at least 2, but try to fit max_size)
+    n_splits = max(2, int(np.ceil(n_features / max_size)))
+    
+    # Hierarchical Clustering
+    try:
+        clustering = AgglomerativeClustering(
+            n_clusters=n_splits,
+            metric="precomputed",
+            linkage="average",
+        )
+    except TypeError:
+        clustering = AgglomerativeClustering(
+            n_clusters=n_splits,
+            affinity="precomputed",
+            linkage="average",
+        )
+        
+    labels = clustering.fit_predict(dist_matrix)
+    
+    sub_clusters = []
+    for label in np.unique(labels):
+        members = [cols[i] for i in range(n_features) if labels[i] == label]
+        if not members:
             continue
-        members = members.copy()
-        rng.shuffle(members)
-        for start in range(0, len(members), max_cluster_size):
-            final_clusters.append(members[start : start + max_cluster_size])
-
-    for col in zero_var_cols:
-        final_clusters.append([col])
-
-    return final_clusters
+            
+        # Check if this sub-cluster needs further splitting
+        # We only recurse if it's still too big OR if we want to enforce tighter correlation
+        # For now, we strictly enforce max_size.
+        if len(members) > max_size:
+            sub_df = df[members]
+            sub_clusters.extend(_recursive_cluster(sub_df, max_size, corr_threshold, random_state))
+        else:
+            sub_clusters.append(members)
+            
+    return sub_clusters
 
 
 @dataclass
@@ -160,6 +188,10 @@ class TensorFlexFeatureRefiner:
         random_state: int = 42,
         artifacts_dir: Optional[Union[str, Path]] = None,
         alpha_grid: Sequence[float] = (0.25, 0.5, 0.75, 1.0),
+        supervised_weight: float = 0.2,
+        corr_threshold: float = 0.85,
+        min_latents: int = TENSOR_FLEX_MIN_LATENTS,
+        max_latents: int = TENSOR_FLEX_MAX_LATENTS,
     ) -> None:
         self.max_cluster_size = max_cluster_size
         self.max_pairs_per_cluster = max_pairs_per_cluster
@@ -171,10 +203,12 @@ class TensorFlexFeatureRefiner:
         self.random_state = random_state
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
         self.alpha_grid = tuple(alpha_grid)
+        self.supervised_weight = supervised_weight
+        self.corr_threshold = corr_threshold
 
         # Dynamic Latent Config
-        self.min_latents = TENSOR_FLEX_MIN_LATENTS
-        self.max_latents = TENSOR_FLEX_MAX_LATENTS
+        self.min_latents = min_latents
+        self.max_latents = max_latents
         self.var_explained_min = TENSOR_FLEX_VAR_EXPLAINED_MIN
         self.sharpe_delta_min = TENSOR_FLEX_SHARPE_DELTA_MIN
         self.enable_dynamic_latents = TENSOR_FLEX_ENABLE_DYNAMIC_LATENTS
@@ -211,6 +245,7 @@ class TensorFlexFeatureRefiner:
         clusters = cluster_features(
             df,
             max_cluster_size=self.max_cluster_size,
+            corr_threshold=self.corr_threshold,
             random_state=self.random_state,
         )
         self.clusters_ = clusters
@@ -231,7 +266,12 @@ class TensorFlexFeatureRefiner:
         cross_after = self._compute_cross_cluster_stats(cluster_frames)
 
         latents_df = self._fit_cluster_latents(cluster_frames, y)
-        selector_output = self._fit_global_selector(latents_df, y, sample_weights)
+        
+        if TENSOR_FLEX_MODE == "v2":
+            selector_output = self._fit_global_selector_v2(latents_df, y, sample_weights)
+        else:
+            selector_output = self._fit_global_selector_legacy(latents_df, y, sample_weights)
+            
         (
             selector,
             selector_type,
@@ -299,7 +339,7 @@ class TensorFlexFeatureRefiner:
         else:
             target.mkdir(parents=True, exist_ok=True)
             model_path = target / "tensor_flex.joblib"
-            report_path = target / "report.json"
+            report_path = target / "tensor_flex_report.json"
 
         joblib.dump(self, model_path)
         if self.report_:
@@ -500,142 +540,148 @@ class TensorFlexFeatureRefiner:
         expectancy = (prec * TP_PCT) - ((1 - prec) * SL_PCT)
         return expectancy * np.sqrt(sum(preds))
 
-    def _fit_global_selector(
+        return selector, selector_type, selected, stability_scores, coef_map
+
+    def _fit_global_selector_v2(
         self,
         latents: pd.DataFrame,
         y: Optional[pd.Series],
         sample_weights: Optional[np.ndarray],
     ):
+        """
+        V2 Selector: Stability + Supervised Score + Variance Rank.
+        """
         if latents.empty:
             return None, None, [], {}, {}
+
+        # 1. Calculate Stability for ALL latents
+        stability_scores = self._estimate_stability(latents, y, "logistic", sample_weights) # Re-use estimate stability or custom?
+        # Actually _estimate_stability uses Lasso/Logistic. We want purely unsupervised stability of the component direction?
+        # The plan said: "run PCA on multiple CV splits... align components".
+        # But here 'latents' are already PCA components from the FULL fit.
+        # If we want stability of the *selection*, we can use the existing _estimate_stability which checks how often a feature is selected.
+        # BUT, the plan also mentioned "stability score as a factor in latent ranking".
+        # Let's stick to a simpler proxy for now: How stable is the correlation with target?
+        # OR, we can just use the existing stability score which is "frequency of selection by Lasso/Logistic".
+        
+        # Let's implement a robust scoring metric for each latent:
+        # Score = (1 - w) * (VarianceRatio normalized) + w * (Supervised Correlation)
+        # Multiplied by Stability (0..1)
+        
+        # We need variance ratios from the cluster PCAs.
+        # Map latent name -> variance ratio
+        var_ratios = {}
+        for cid, pca in self.cluster_pca_.items():
+            names = self.cluster_latent_names_[cid]
+            ratios = pca.explained_variance_ratio_[:len(names)]
+            for name, ratio in zip(names, ratios):
+                var_ratios[name] = ratio
+                
+        # Normalize variance ratios globally or per cluster? Globally is better for "global" importance.
+        # But different clusters have different total variance.
+        # Let's just use raw ratio.
+        
+        # Supervised Score
+        supervised_scores = {}
+        if y is not None:
+            y_aligned = y.reindex(latents.index).fillna(0)
+            for col in latents.columns:
+                corr = latents[col].corr(y_aligned)
+                supervised_scores[col] = abs(corr) if not np.isnan(corr) else 0.0
+        else:
+            supervised_scores = {col: 0.0 for col in latents.columns}
             
-        # If dynamic latents disabled, use old logic (Lasso/Logistic selector)
-        if not self.enable_dynamic_latents:
-            return self._fit_global_selector_legacy(latents, y, sample_weights)
+        # Stability Score (using simple subsample correlation stability)
+        # If we don't have a good stability measure yet, default to 1.0
+        # The existing _estimate_stability is for FEATURE SELECTION stability, not component stability.
+        # Let's use a simple bootstrap correlation stability if y is present.
+        stability_map = {}
+        if y is not None:
+            stability_map = self._bootstrap_correlation_stability(latents, y)
+        else:
+            stability_map = {col: 1.0 for col in latents.columns}
 
-        # --- Dynamic Latent Selection Logic ---
-        logger.info("[Tensor-Flex] Running Dynamic Latent Selection...")
+        # Combine Scores
+        final_scores = {}
+        w = self.supervised_weight
         
-        # 1. Order candidates by variance explained (using cluster metadata)
-        # We need to reconstruct which latent belongs to which cluster and its variance contribution
-        # For simplicity, we'll assume the columns are already roughly ordered or we trust the PCA variance.
-        # But wait, latents_df columns are shuffled in _fit_cluster_latents.
-        # We should probably sort them by some metric.
-        # Let's use single-feature predictive power + variance as a heuristic sort.
+        # Max variance for normalization
+        max_var = max(var_ratios.values()) if var_ratios else 1.0
+        max_sup = max(supervised_scores.values()) if supervised_scores else 1.0
         
-        if y is None:
-             # Fallback if no Y
-             return self._fit_global_selector_legacy(latents, y, sample_weights)
+        for col in latents.columns:
+            v_score = var_ratios.get(col, 0.0) / max_var
+            s_score = supervised_scores.get(col, 0.0) / max_sup if max_sup > 0 else 0.0
+            stab = stability_map.get(col, 1.0)
+            
+            # Combined metric
+            final_scores[col] = ( (1 - w) * v_score + w * s_score ) * stab
 
-        # Sort candidates by individual predictive power
-        corrs = latents.corrwith(y).abs().sort_values(ascending=False)
-        sorted_candidates = corrs.index.tolist()
+        # Select Top K
+        sorted_cols = sorted(final_scores.keys(), key=lambda x: final_scores[x], reverse=True)
         
-        # Split for validation
-        split_idx = int(len(latents) * 0.7)
-        X_train_all, X_val_all = latents.iloc[:split_idx], latents.iloc[split_idx:]
-        y_train, y_val = y.iloc[:split_idx], y.iloc[split_idx:]
-        
-        n_pos = (y_train == 1).sum()
-        n_neg = (y_train == 0).sum()
-        class_weight = {0: 1.0, 1: n_neg / max(1, n_pos)}
-        
+        # Filter by min/max latents
+        # Also ensure we don't pick garbage (score ~ 0)
         selected = []
-        best_metric = -float('inf')
-        cumulative_variance = 0.0 # We don't track true global variance easily here without full PCA, 
-                                  # but we can track count.
-        
-        for feature in sorted_candidates:
-            # Stop if max reached
+        for col in sorted_cols:
             if len(selected) >= self.max_latents:
                 break
+            if final_scores[col] > 1e-6: # minimal threshold
+                selected.append(col)
                 
-            trial = selected + [feature]
+        # Enforce min latents if possible
+        if len(selected) < self.min_latents:
+            # Take more if available
+            remaining = [c for c in sorted_cols if c not in selected]
+            needed = self.min_latents - len(selected)
+            selected.extend(remaining[:needed])
+
+        return None, "v2_weighted_rank", selected, stability_map, final_scores
+
+    def _bootstrap_correlation_stability(self, X: pd.DataFrame, y: pd.Series, n_splits: int = 5) -> Dict[str, float]:
+        """
+        Estimate how stable the sign/magnitude of correlation is across splits.
+        Returns 1.0 - std(corr) / 2 (approx) or similar.
+        Actually, let's use: mean(abs(corr)) / (std(abs(corr)) + epsilon) -> Signal to Noise?
+        Or simply: fraction of splits where correlation sign matches global sign?
+        Let's use a simple CV consistency: mean correlation across folds.
+        """
+        scores = {col: [] for col in X.columns}
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        
+        y_aligned = y.reindex(X.index).fillna(0)
+        
+        for train_idx, _ in tscv.split(X):
+            X_fold = X.iloc[train_idx]
+            y_fold = y_aligned.iloc[train_idx]
             
-            # Force add if below min
-            if len(trial) <= self.min_latents:
-                selected.append(feature)
-                # Update metric baseline
-                best_metric = self._evaluate_latent_set(X_train_all[selected], y_train, X_val_all[selected], y_val, class_weight)
+            # Skip small folds
+            if len(X_fold) < 50:
                 continue
                 
-            # Evaluate
-            metric = self._evaluate_latent_set(X_train_all[trial], y_train, X_val_all[trial], y_val, class_weight)
-            
-            delta = metric - best_metric
-            if delta > self.sharpe_delta_min:
-                selected.append(feature)
-                best_metric = metric
-            else:
-                # Diminishing returns
-                pass
+            for col in X.columns:
+                c = X_fold[col].corr(y_fold)
+                scores[col].append(c if not np.isnan(c) else 0.0)
                 
-        logger.info(f"[Tensor-Flex] Selected {len(selected)} latents. Final Proxy Metric: {best_metric:.4f}")
-        
-        # Return in format expected by caller
-        # We fake the selector object since we did a greedy search
-        stability = {col: 1.0 for col in selected}
-        coefs = {col: 1.0 for col in selected}
-        
-        return None, "dynamic_greedy", selected, stability, coefs
-
-    def _fit_global_selector_legacy(
-        self,
-        latents: pd.DataFrame,
-        y: Optional[pd.Series],
-        sample_weights: Optional[np.ndarray],
-    ):
-        if y is None or len(pd.unique(y.dropna())) < 2:
-            logger.warning("No valid labels passed to Tensor-Flex selector; returning full latent set.")
-            names = list(latents.columns)
-            stability = {col: 1.0 for col in names}
-            coefs = {col: 0.0 for col in names}
-            return None, None, names, stability, coefs
-
-        target = pd.Series(y).reindex(latents.index)
-        weights = None
-        if sample_weights is not None:
-            if isinstance(sample_weights, pd.Series):
-                weights_series = sample_weights.reindex(latents.index).fillna(1.0)
-                weights = weights_series.to_numpy(dtype=float)
+        stability = {}
+        for col, vals in scores.items():
+            if not vals:
+                stability[col] = 0.0
+                continue
+            # Stability = 1 - (std / (mean + epsilon)) ? No, too volatile.
+            # Let's use: How often is the sign consistent?
+            vals = np.array(vals)
+            mean_val = np.mean(vals)
+            if abs(mean_val) < 1e-9:
+                stability[col] = 0.0
             else:
-                weights = np.asarray(sample_weights, dtype=float).reshape(-1)
-                if weights.shape[0] != latents.shape[0]:
-                    raise ValueError("sample_weights length mismatch.")
-
-        unique_values = pd.Series(target).dropna().unique()
-        is_binary = len(unique_values) <= 2
-        selector_type = "logistic" if is_binary else "lasso"
-
-        selector = self._build_selector(selector_type)
-        stability_scores = self._estimate_stability(latents, target, selector_type, weights)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            warnings.simplefilter("ignore", category=ConvergenceWarning)
-            selector.fit(latents.values, target.values, sample_weight=weights)
-        if selector_type == "logistic":
-            coef = selector.coef_.ravel()
-        else:
-            coef = selector.coef_
-        coef_map = {col: float(weight) for col, weight in zip(latents.columns, coef)}
-
-        selected = [
-            col
-            for col in latents.columns
-            if abs(coef_map[col]) >= self.selector_coef_threshold
-            and stability_scores.get(col, 0.0) >= self.stability_threshold
-        ]
-        if not selected:
-            sorted_cols = sorted(
-                latents.columns,
-                key=lambda col: (abs(coef_map[col]), stability_scores.get(col, 0.0)),
-                reverse=True,
-            )
-            top_k = min(32, len(sorted_cols))
-            selected = sorted_cols[:top_k]
-
-        return selector, selector_type, selected, stability_scores, coef_map
+                # CV of the correlation coefficient
+                # Lower CV is better. We want a score in [0, 1].
+                # Let's use 1 / (1 + CV)
+                cv = np.std(vals) / (abs(mean_val) + 1e-6)
+                stability[col] = 1.0 / (1.0 + cv)
+                
+        return stability
 
     def _build_selector(self, selector_type: str):
         if selector_type == "logistic":
@@ -770,7 +816,24 @@ class TensorFlexFeatureRefiner:
         cross_after: Dict[str, float],
         latents_df: pd.DataFrame,
     ) -> None:
+        # Collect latent details
+        latent_details = []
+        for col in latents_df.columns:
+            latent_details.append({
+                "name": col,
+                "selected": col in self.selected_feature_names_,
+                "stability": self.feature_stability_.get(col, 0.0),
+                "importance_score": self.feature_importance_.get(col, 0.0),
+            })
+            
         self.report_ = {
+            "config": {
+                "mode": TENSOR_FLEX_MODE,
+                "max_cluster_size": self.max_cluster_size,
+                "min_latents": self.min_latents,
+                "max_latents": self.max_latents,
+                "supervised_weight": self.supervised_weight,
+            },
             "clusters": {
                 "num_clusters": len(self.clusters_),
                 "sizes": [len(c) for c in self.clusters_],
@@ -782,9 +845,10 @@ class TensorFlexFeatureRefiner:
                 "after_mean": cross_after.get("mean", 0.0),
             },
             "global_selector": {
-                "num_latents": latents_df.shape[1],
-                "num_final_features": len(self.selected_feature_names_),
-                "stability_stats": self.feature_stability_,
+                "num_latents_total": latents_df.shape[1],
+                "num_latents_selected": len(self.selected_feature_names_),
+                "selector_type": self.selector_type_,
+                "latents": latent_details,
             },
         }
 

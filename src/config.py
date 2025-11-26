@@ -68,7 +68,10 @@ TENSOR_FLEX_ARTIFACTS_DIR = Path("artifacts/tensor_flex")
 TENSOR_FLEX_LOAD_IF_AVAILABLE = True
 
 # Tensor-Flex latent selection
-TENSOR_FLEX_MIN_LATENTS = 2
+TENSOR_FLEX_MODE = "v2"  # "v1" or "v2"
+TENSOR_FLEX_CORR_THRESHOLD = 0.85
+TENSOR_FLEX_SUPERVISED_WEIGHT = 0.2
+TENSOR_FLEX_MIN_LATENTS = 3
 TENSOR_FLEX_MAX_LATENTS = 8
 TENSOR_FLEX_VAR_EXPLAINED_MIN = 0.85  # cumulative variance threshold
 TENSOR_FLEX_SHARPE_DELTA_MIN = 0.02   # minimum Sharpe/expectancy delta needed per extra latent
