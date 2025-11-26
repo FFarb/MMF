@@ -96,8 +96,8 @@ class SignalFactory:
 
             bb = ta.bbands(df["close"], length=window, std=2)
             if bb is not None:
-                df[f"BB_pctB_{window}"] = bb[f"BBP_{window}_2.0"].astype(np.float32)
-                df[f"BB_width_{window}"] = bb[f"BBB_{window}_2.0"].astype(np.float32)
+                df[f"BB_pctB_{window}"] = bb[f"BBP_{window}_2"].astype(np.float32)
+                df[f"BB_width_{window}"] = bb[f"BBB_{window}_2"].astype(np.float32)
 
             if window < 50:
                 df[f"MFI_{window}"] = ta.mfi(df["high"], df["low"], df["close"], df["volume"], length=window).astype(

@@ -119,12 +119,15 @@ def bbands(
     bandwidth = (upper - lower) / middle
     percent_b = (close - lower) / (upper - lower + 1e-10)
     
+    # Format std as integer if it's a whole number
+    std_str = str(int(std)) if std == int(std) else str(std)
+    
     result = pd.DataFrame(index=close.index)
-    result[f'BBL_{length}_{std}'] = lower
-    result[f'BBM_{length}_{std}'] = middle
-    result[f'BBU_{length}_{std}'] = upper
-    result[f'BBB_{length}_{std}'] = bandwidth
-    result[f'BBP_{length}_{std}'] = percent_b
+    result[f'BBL_{length}_{std_str}'] = lower
+    result[f'BBM_{length}_{std_str}'] = middle
+    result[f'BBU_{length}_{std_str}'] = upper
+    result[f'BBB_{length}_{std_str}'] = bandwidth
+    result[f'BBP_{length}_{std_str}'] = percent_b
     
     return result
 
