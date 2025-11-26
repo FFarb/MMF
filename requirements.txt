@@ -10,6 +10,3 @@ fastparquet>=2023.0.0
 hmmlearn>=0.3.0
 torch>=2.0.0
 xgboost>=1.7.0
-# pandas-ta: Using git version for Python 3.10+ compatibility
-# If installation fails, try: pip install pandas-ta==0.3.14b
-pandas-ta @ git+https://github.com/twopirllc/pandas-ta.git@development

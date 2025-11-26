@@ -1,5 +1,5 @@
 """
-Reliable environment installation script for QFC Trading System.
+Reliable environment installation script for MMF Trading System.
 Designed for Vast.AI and cloud environments with dependency validation.
 """
 import subprocess
@@ -31,7 +31,7 @@ def run_pip_install(packages, description="packages"):
         return False
 
 def install_from_requirements():
-    """Install from requirements.txt with special handling for pandas-ta."""
+    """Install from requirements.txt."""
     req_file = Path("requirements.txt")
     
     if not req_file.exists():
@@ -42,50 +42,15 @@ def install_from_requirements():
     with open(req_file, 'r') as f:
         lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
     
-    # Separate pandas-ta from other requirements
-    pandas_ta_line = None
-    other_reqs = []
-    
-    for line in lines:
-        if 'pandas-ta' in line:
-            pandas_ta_line = line
-        else:
-            other_reqs.append(line)
-    
-    # Install core packages first
+    # Install all packages
     print("\n" + "="*70)
-    print("INSTALLING QFC DEPENDENCIES")
+    print("INSTALLING MMF DEPENDENCIES")
     print("="*70)
     
-    if other_reqs:
-        success = run_pip_install(other_reqs, "core dependencies")
+    if lines:
+        success = run_pip_install(lines, "all dependencies")
         if not success:
-            print("\n⚠️  Some core packages failed. Continuing anyway...")
-    
-    # Install pandas-ta separately (may fail in some environments)
-    if pandas_ta_line:
-        print("\n[INSTALLING] pandas-ta (technical analysis library)...")
-        print("   Note: This uses git installation and may take longer...")
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", pandas_ta_line],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            print("✓ pandas-ta installed successfully")
-        except subprocess.CalledProcessError:
-            print("⚠️  pandas-ta git installation failed")
-            print("   Trying PyPI fallback version...")
-            try:
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "install", "pandas-ta==0.3.14b"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                print("✓ pandas-ta (PyPI version) installed")
-            except subprocess.CalledProcessError:
-                print("❌ pandas-ta installation failed completely")
-                print("   You may need to install manually: pip install pandas-ta")
+            print("\n⚠️  Some packages failed. Continuing anyway...")
     
     return True
 
@@ -104,10 +69,6 @@ def verify_imports():
         ("pybit", "Bybit API"),
     ]
     
-    optional_imports = [
-        ("pandas_ta", "pandas-ta"),
-    ]
-    
     all_ok = True
     
     for module, name in critical_imports:
@@ -118,19 +79,12 @@ def verify_imports():
             print(f"❌ {name} - CRITICAL")
             all_ok = False
     
-    for module, name in optional_imports:
-        try:
-            __import__(module)
-            print(f"✓ {name}")
-        except ImportError:
-            print(f"⚠️  {name} - OPTIONAL (some features may not work)")
-    
     return all_ok
 
 def main():
     """Main installation workflow."""
     print("="*70)
-    print("QFC TRADING SYSTEM - ENVIRONMENT INSTALLER")
+    print("MMF TRADING SYSTEM - ENVIRONMENT INSTALLER")
     print("="*70)
     
     # Step 1: Check Python version

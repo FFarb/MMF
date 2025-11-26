@@ -10,13 +10,19 @@ Author: Senior Quant Developer
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import precision_score, recall_score, accuracy_score, confusion_matrix
 from data_manager import BybitDataManager
 import warnings
+
+# Import internal TA module
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+from src.indicators import ta_core as ta
+
 warnings.filterwarnings('ignore')
 
 # ============================================================================

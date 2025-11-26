@@ -9,8 +9,9 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 import warnings
+
+from ..indicators import ta_core as ta
 
 from ..config import DAYS_BACK, FEATURE_STORE
 from ..data_loader import MarketDataLoader
@@ -28,7 +29,7 @@ warnings.filterwarnings("ignore")
 
 class SignalFactory:
     """
-    Generates hundreds of alpha factors from OHLCV data using pandas_ta.
+    Generates hundreds of alpha factors from OHLCV data using internal TA indicators.
     """
 
     def __init__(self) -> None:
@@ -65,13 +66,12 @@ class SignalFactory:
         df["volatility_100"] = df["log_ret"].rolling(window=100).std().astype(np.float32)
         df["volatility_200"] = df["log_ret"].rolling(window=200).std().astype(np.float32)
         df["volatility"] = df["volatility_20"]
-        if hasattr(ta, "hurst"):
+        try:
             hurst_vals = ta.hurst(df["close"], length=100)
             if hurst_vals is not None:
-                if isinstance(hurst_vals, pd.DataFrame):
-                    df["hurst"] = hurst_vals.iloc[:, 0].astype(np.float32)
-                else:
-                    df["hurst"] = hurst_vals.astype(np.float32)
+                df["hurst"] = hurst_vals.astype(np.float32)
+        except Exception:
+            pass
 
         print(f"  [STEP B] Parametric indicators for windows: {self.windows}")
         for window in self.windows:
@@ -96,8 +96,8 @@ class SignalFactory:
 
             bb = ta.bbands(df["close"], length=window, std=2)
             if bb is not None:
-                df[f"BB_pctB_{window}"] = bb.iloc[:, 4].astype(np.float32)
-                df[f"BB_width_{window}"] = bb.iloc[:, 3].astype(np.float32)
+                df[f"BB_pctB_{window}"] = bb[f"BBP_{window}_2.0"].astype(np.float32)
+                df[f"BB_width_{window}"] = bb[f"BBB_{window}_2.0"].astype(np.float32)
 
             if window < 50:
                 df[f"MFI_{window}"] = ta.mfi(df["high"], df["low"], df["close"], df["volume"], length=window).astype(
@@ -108,9 +108,9 @@ class SignalFactory:
         df["CMF"] = ta.cmf(df["high"], df["low"], df["close"], df["volume"], length=20).astype(np.float32)
         macds = ta.macd(df["close"])
         if macds is not None:
-            df["MACD"] = macds.iloc[:, 0].astype(np.float32)
-            df["MACD_hist"] = macds.iloc[:, 1].astype(np.float32)
-            df["MACD_signal"] = macds.iloc[:, 2].astype(np.float32)
+            df["MACD"] = macds["MACD_12_26_9"].astype(np.float32)
+            df["MACD_hist"] = macds["MACDh_12_26_9"].astype(np.float32)
+            df["MACD_signal"] = macds["MACDs_12_26_9"].astype(np.float32)
 
         print("  [STEP C] Statistical features")
         for window in [20, 24, 50, 100]:
@@ -238,13 +238,12 @@ def _derive_hurst(features_df: pd.DataFrame, reference_df: Optional[pd.DataFrame
     elif "close" in features_df.columns:
         price_series = features_df["close"]
 
-    if price_series is not None and hasattr(ta, "hurst"):
-        hurst_vals = ta.hurst(price_series, length=100)
-        if hurst_vals is not None:
-            if isinstance(hurst_vals, pd.DataFrame):
-                hurst_series = hurst_vals.iloc[:, 0]
-            else:
-                hurst_series = hurst_vals
-            return hurst_series.reindex(features_df.index).fillna(0)
+    if price_series is not None:
+        try:
+            hurst_vals = ta.hurst(price_series, length=100)
+            if hurst_vals is not None:
+                return hurst_vals.reindex(features_df.index).fillna(0)
+        except Exception:
+            pass
 
     return pd.Series(0.0, index=features_df.index)

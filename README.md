@@ -6,7 +6,7 @@ The canonical Git remote lives at [`https://github.com/FFarb/MMF`](https://githu
 ## Architecture
 
 1. **Data & Physics Engine** (`src/features/advanced_stats.py` / `src/features/__init__.py`)  
-   - Builds OHLCV features with `pandas_ta` plus Numba-accelerated chaos metrics (Hurst, Shannon entropy, FDI) across multiple windows.  
+   - Builds OHLCV features with internal TA indicators plus Numba-accelerated chaos metrics (Hurst, Shannon entropy, FDI) across multiple windows.  
    - Rolling volatility columns (`volatility_20/100/200`) are emitted for downstream gating logic.
 
 2. **Alpha Council** (`src/features/alpha_council.py`)  
@@ -79,7 +79,7 @@ Legacy one-off scripts (e.g., `run_experiment.py`, visualization demos) remain f
 ## Requirements
 
 - Python 3.10+  
-- Core libraries: `pandas`, `numpy`, `scikit-learn`, `pandas-ta`, `numba`, `plotly`, `pyarrow`  
+- Core libraries: `pandas`, `numpy`, `scikit-learn`, `numba`, `plotly`, `pyarrow`  
 - Exchange connectivity: Bybit public REST (no API key required for historical klines, but non-US IP may be necessary).
 
 Install dependencies:
