@@ -1,6 +1,7 @@
-# Money Machine Research Stack
+# Money Machine Framework (MMF)
 
-Next-generation quant research environment for chaotic crypto futures markets. The stack fuses physics-inspired feature engineering, a democratic feature council, and a Mixture-of-Experts trader governed by an adaptive scheduler.
+Next-generation quant research environment for chaotic crypto futures markets. The stack fuses physics-inspired feature engineering, a democratic feature council, a Tensor-Flex latent refinery, a temporal CNN expert, and a Mixture-of-Experts trader governed by an adaptive scheduler.  
+The canonical Git remote lives at [`https://github.com/FFarb/MMF`](https://github.com/FFarb/MMF) — clone or add it as the primary origin before submitting changes.
 
 ## Architecture
 
@@ -12,12 +13,16 @@ Next-generation quant research environment for chaotic crypto futures markets. T
    - Three voting experts (Lasso/ANOVA, RandomForest, Mutual Information) decide which features survive.  
    - A feature must place in the top 50% for at least two experts to pass.
 
-3. **Money Machine Trader** (`src/models/moe_ensemble.py`)  
-   - Mixture-of-Experts: Trend (Gradient Boosting), Range (k-NN), Stress (Logistic Regression).  
-   - Gating MLP consumes `[hurst_200, entropy_200, fdi_200]` to weight each expert per sample.  
-   - `get_system_complexity()` reports the effective parameter count (gating weights + tree nodes + k-NN memory + logistic coefs).
+3. **Tensor-Flex Latent Refinery** (`src/features/tensor_flex.py`)  
+   - Clusters correlated features, runs Tensor Talk for cross-cluster deconfounding, then per-cluster PCA with stability-aware selection.  
+   - Exposes two modes: `mode="selected"` (distilled latents for classic experts) and `mode="full_latents"` (complete latent stack for neural experts).
 
-4. **Meta Controller** (`src/training/meta_controller.py`)  
+4. **Money Machine Trader** (`src/models/moe_ensemble.py`)  
+   - Mixture-of-Experts: Trend (Gradient Boosting + GraphVisionary hybrid), Range (k-NN), Stress (Logistic Regression), Temporal CNN (`src/models/cnn_temporal.py`).  
+   - Gating MLP consumes `[hurst_200, entropy_200, fdi_200]` and outputs four softmax weights. Telemetry reports the average share for each expert and the marginal uplift contributed by the CNN.  
+   - CNNExpert operates on `[C × L]` Tensor-Flex latent windows and saves artifacts under `artifacts/cnn_expert`.
+
+5. **Meta Controller** (`src/training/meta_controller.py`)  
    - Observes market entropy and volatility to adjust estimator counts / epochs.  
    - Monitors validation stability and rolling Sharpe decay to trigger deeper training or retraining.
 
@@ -60,9 +65,11 @@ src/
     __init__.py                 # SignalFactory + feature helpers
     advanced_stats.py           # Numba chaos metrics
     alpha_council.py            # Feature voting system
+    tensor_flex.py              # Tensor-Flex distillation & latent routing
   models/
     __init__.py                 # SniperModelTrainer (primary flow)
     moe_ensemble.py             # Mixture-of-Experts implementation
+    cnn_temporal.py             # Temporal ConvNet + CNNExpert wrapper
   training/
     meta_controller.py          # Adaptive scheduler
 ```
@@ -81,13 +88,71 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+## Git & Repository Initialization
+
+```bash
+# Clone (or add as origin) the official repo
+git clone https://github.com/FFarb/MMF.git
+cd MMF
+# If this tree already exists locally, repoint origin:
+git remote set-url origin https://github.com/FFarb/MMF.git
+git pull origin main
+```
+
+Use feature branches for changes, commit locally, then push back to `FFarb/MMF`.
+
+## Vast AI Deployment Cheat Sheet
+
+1. **Provision** a GPU/CPU instance via Vast AI (Ubuntu 22.04+ recommended).  
+2. **Bootstrap packages**:
+
+```bash
+sudo apt update
+sudo apt install -y git python3.10 python3.10-venv python3-pip
+```
+
+3. **Clone + setup**:
+
+```bash
+cd /workspace  # or preferred mount
+git clone https://github.com/FFarb/MMF.git
+cd MMF
+python3.10 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+4. **Prime artifacts (optional)**:
+
+```bash
+# Fit Tensor-Flex only (saves to artifacts/tensor_flex)
+python run_deep_research.py --use-tensor-flex --tensor-flex-train-only
+```
+
+5. **Full training passes**:
+
+```bash
+# Standard run with Tensor-Flex + CNN expert enabled via config
+python run_deep_research.py --use-tensor-flex
+
+# Force Tensor-Flex refit and retrain everything
+python run_deep_research.py --use-tensor-flex --tensor-flex-force-retrain
+
+# Disable Tensor-Flex/CNN for debugging
+python run_deep_research.py --no-tensor-flex
+```
+
+All snapshots land in `artifacts/`, and CNN artifacts are persisted under `artifacts/cnn_expert`.
+
 ## Notes & Tips
 
 - The SignalFactory lags every engineered feature across `[1,2,3,5,8,13]` bars; expect ~1,300 columns before council pruning.  
 - `AlphaCouncil.top_ratio` controls how aggressive the voting cutoff is.  
 - To integrate with other assets or intervals, adjust `src/config.py` and rerun `run_deep_research.py`.  
 - The MoE gating network requires the physics trio; do not remove `hurst_200`, `entropy_200`, or `fdi_200` columns.  
-- Parameter count is a diagnostic metric; use it to track how model capacity changes across runs.
+- Parameter count is a diagnostic metric; use it to track how model capacity changes across runs.  
+- Monitor `[MoE] Gating Shares` in the console: a healthy CNN integration shows a non-zero `share_cnn` with stable `cnn_delta_mean`.
 
 ---
 Created by the Quant Futures Research Team (2025). All components are intended for research use only.

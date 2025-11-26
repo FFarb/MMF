@@ -21,6 +21,7 @@ from .advanced_stats import (
     calculate_shannon_entropy,
 )
 from .alpha_council import AlphaCouncil
+from .tensor_flex import TensorFlexFeatureRefiner, cluster_features
 
 warnings.filterwarnings("ignore")
 
@@ -225,6 +226,8 @@ __all__ = [
     "calculate_fdi",
     "calculate_hurst_rs",
     "calculate_shannon_entropy",
+    "TensorFlexFeatureRefiner",
+    "cluster_features",
 ]
 
 

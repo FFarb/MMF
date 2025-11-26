@@ -4,8 +4,10 @@ Updated with Telemetry & Sample Weighting support.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Sequence, Optional
+from pathlib import Path
+from typing import Dict, List, Sequence, Optional
 
 import numpy as np
 import pandas as pd
@@ -16,8 +18,25 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
+from .cnn_temporal import CNNExpert
 from .deep_experts import TorchSklearnWrapper
-from ..config import NUM_ASSETS
+from ..config import (
+    NUM_ASSETS,
+    CNN_ARTIFACTS_DIR,
+    CNN_BATCH_SIZE,
+    CNN_C_MID,
+    CNN_DROPOUT,
+    CNN_EPOCHS,
+    CNN_FILL_EARLY,
+    CNN_HIDDEN,
+    CNN_LATENT_PREFIX,
+    CNN_LR,
+    CNN_RANDOM_STATE,
+    CNN_USE,
+    CNN_WINDOW_L,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _as_dataframe(X: pd.DataFrame | np.ndarray | Sequence[Sequence[float]]) -> pd.DataFrame:
@@ -40,12 +59,17 @@ def _ensure_columns(df: pd.DataFrame, columns: Sequence[str]) -> List[str]:
 def _derive_regime_targets(physics_matrix: np.ndarray) -> np.ndarray:
     hurst = physics_matrix[:, 0]
     entropy = physics_matrix[:, 1]
-    volatility = physics_matrix[:, 2]
+    fractal_dim = physics_matrix[:, 2]
+    fractal_dim = np.nan_to_num(fractal_dim, nan=np.nanmean(fractal_dim))
+    entropy = np.nan_to_num(entropy, nan=np.nanmean(entropy))
     labels = np.zeros(hurst.shape[0], dtype=int)
-    stress_mask = (entropy > 0.85) | (volatility > np.median(volatility) + np.std(volatility))
+    high_fdi = np.nanpercentile(fractal_dim, 75)
+    stress_mask = (entropy > 0.9) | (fractal_dim > high_fdi)
     range_mask = (~stress_mask) & (hurst <= 0.55)
+    cnn_mask = (~stress_mask) & (~range_mask) & ((entropy >= 0.6) & (entropy <= 0.85))
     labels[range_mask] = 1  # Range
     labels[stress_mask] = 2  # Stress
+    labels[cnn_mask] = 3    # CNN-preferring ambiguous churn
     return labels
 
 
@@ -142,40 +166,71 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
 
 @dataclass
 class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
-    physics_features: Sequence[str] = field(default_factory=lambda: ("hurst_200", "entropy_200", "volatility_200"))
+    physics_features: Sequence[str] = field(default_factory=lambda: ("hurst_200", "entropy_200", "fdi_200"))
     random_state: int = 42
     trend_estimators: int = 300
     gating_epochs: int = 500
+    use_cnn: bool = CNN_USE
+    cnn_window: int = CNN_WINDOW_L
+    cnn_mid_channels: int = CNN_C_MID
+    cnn_hidden_dim: int = CNN_HIDDEN
+    cnn_dropout: float = CNN_DROPOUT
+    cnn_lr: float = CNN_LR
+    cnn_epochs: int = CNN_EPOCHS
+    cnn_batch_size: int = CNN_BATCH_SIZE
+    cnn_random_state: int = CNN_RANDOM_STATE
+    cnn_fill_strategy: str = CNN_FILL_EARLY
+    cnn_artifacts_dir: Optional[Path | str] = CNN_ARTIFACTS_DIR
+    cnn_latent_prefix: str = CNN_LATENT_PREFIX
 
     def __post_init__(self) -> None:
         self.trend_expert = HybridTrendExpert(n_estimators=self.trend_estimators, random_state=self.random_state)
         self.range_expert = KNeighborsClassifier(n_neighbors=15, weights="distance")
         self.stress_expert = LogisticRegression(class_weight={0: 2.0, 1: 1.0}, max_iter=500)
-        self.gating_network = MLPClassifier(hidden_layer_sizes=(8,), activation="tanh", max_iter=self.gating_epochs, random_state=self.random_state)
+        self.gating_network = MLPClassifier(
+            hidden_layer_sizes=(8,),
+            activation="tanh",
+            max_iter=self.gating_epochs,
+            random_state=self.random_state,
+        )
         self.feature_scaler = StandardScaler()
         self.physics_scaler = StandardScaler()
         self._fitted = False
+        self.cnn_expert: Optional[CNNExpert] = None
+        self.cnn_feature_columns_: List[str] = []
+        self._cnn_enabled = False
+        self._last_cnn_stats: Dict[str, float] = {}
+        if isinstance(self.cnn_artifacts_dir, (str, Path)):
+            self.cnn_artifacts_dir = Path(self.cnn_artifacts_dir)
+        else:
+            self.cnn_artifacts_dir = None
 
     def fit(self, X, y, sample_weight=None) -> "MixtureOfExpertsEnsemble":
         """Fit with sample weights support."""
         df = _as_dataframe(X)
-        physics_cols = _ensure_columns(df, self.physics_features)
+        df = df.copy()
+        self.cnn_feature_columns_ = [col for col in df.columns if col.startswith(self.cnn_latent_prefix)]
+        base_df = df.drop(columns=self.cnn_feature_columns_, errors="ignore")
+        physics_cols = _ensure_columns(base_df, self.physics_features)
         
         # Prepare Features
-        numeric_df = df.select_dtypes(include=["number"])
+        numeric_df = base_df.select_dtypes(include=["number"])
         self.feature_columns_ = list(numeric_df.columns)
         X_scaled = self.feature_scaler.fit_transform(numeric_df.to_numpy(dtype=float))
         y_array = np.ravel(np.asarray(y))
 
         # Train Experts (Pass weights where supported)
         print("    [MoE] Training Experts with Smart Weights...")
-        self.trend_expert.fit(X, y_array, sample_weight=sample_weight)
+        self.trend_expert.fit(base_df, y_array, sample_weight=sample_weight)
         self.range_expert.fit(X_scaled, y_array) # KNN doesn't support fit weights usually
         self.stress_expert.fit(X_scaled, y_array, sample_weight=sample_weight)
 
+        # Temporal CNN Expert
+        self._train_cnn_expert(df, y_array)
+
         # Train Gating
         print("    [MoE] Training Gating Network...")
-        physics_matrix = df.loc[:, physics_cols].to_numpy(dtype=float)
+        physics_matrix = base_df.loc[:, physics_cols].to_numpy(dtype=float)
         scaled_physics = self.physics_scaler.fit_transform(physics_matrix)
         regime_labels = _derive_regime_targets(physics_matrix)
         self.gating_network.fit(scaled_physics, regime_labels) # MLP doesn't support sample_weight standardly
@@ -184,30 +239,104 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         self._fitted = True
         return self
 
+    def _train_cnn_expert(self, df: pd.DataFrame, y_array: np.ndarray) -> None:
+        """Fit the temporal CNN expert if enabled."""
+        self._cnn_enabled = False
+        if not self.use_cnn:
+            logger.info("CNNExpert disabled via configuration.")
+            self.cnn_expert = None
+            return
+        if not self.cnn_feature_columns_:
+            logger.info("CNNExpert skipped because no temporal latent columns were provided.")
+            self.cnn_expert = None
+            return
+        y_series = pd.Series(y_array, index=df.index)
+        cnn_df = df[self.cnn_feature_columns_].copy()
+        self.cnn_expert = CNNExpert(
+            window_length=self.cnn_window,
+            mid_channels=self.cnn_mid_channels,
+            hidden_dim=self.cnn_hidden_dim,
+            dropout=self.cnn_dropout,
+            lr=self.cnn_lr,
+            epochs=self.cnn_epochs,
+            batch_size=self.cnn_batch_size,
+            random_state=self.cnn_random_state,
+            fill_strategy=self.cnn_fill_strategy,
+            artifacts_path=self.cnn_artifacts_dir,
+        )
+        try:
+            self.cnn_expert.fit(cnn_df, y_series)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("CNNExpert training failed (%s). Falling back to 3-way MoE.", exc)
+            self.cnn_expert = None
+            return
+        self._cnn_enabled = True
+        logger.info(
+            "CNNExpert trained with %s features (window=%s).",
+            cnn_df.shape[1],
+            self.cnn_window,
+        )
+
     def _gating_weights(self, physics_matrix: np.ndarray) -> np.ndarray:
         scaled = self.physics_scaler.transform(physics_matrix)
         raw = self.gating_network.predict_proba(scaled)
-        weights = np.full((scaled.shape[0], 3), 1.0 / 3.0, dtype=float)
+        n_outputs = 4 if self._cnn_enabled else 3
+        weights = np.full((scaled.shape[0], n_outputs), 1.0 / float(n_outputs), dtype=float)
         for idx, cls in enumerate(self._gate_classes_):
             if cls < weights.shape[1]:
                 weights[:, cls] = raw[:, idx]
+        weights = np.clip(weights, 1e-6, None)
         weights /= weights.sum(axis=1, keepdims=True)
+        if not self._cnn_enabled and weights.shape[1] > 3:
+            base = weights[:, :3]
+            base /= base.sum(axis=1, keepdims=True)
+            return base
         return weights
 
     def predict_proba(self, X) -> np.ndarray:
         # Same as before
         if not self._fitted: raise RuntimeError("Not fitted")
         df = _as_dataframe(X)
-        X_scaled = self.feature_scaler.transform(df[self.feature_columns_].to_numpy(dtype=float))
-        physics_matrix = df.loc[:, _ensure_columns(df, self.physics_features)].to_numpy(dtype=float)
+        df = df.copy()
+        if self._cnn_enabled:
+            for col in self.cnn_feature_columns_:
+                if col not in df.columns:
+                    df[col] = 0.0
+        base_df = df.drop(columns=self.cnn_feature_columns_, errors="ignore")
+        for col in self.feature_columns_:
+            if col not in base_df.columns:
+                base_df[col] = 0.0
+        numeric = base_df[self.feature_columns_]
+        X_scaled = self.feature_scaler.transform(numeric.to_numpy(dtype=float))
+        physics_matrix = base_df.loc[:, _ensure_columns(base_df, self.physics_features)].to_numpy(dtype=float)
         
         weights = self._gating_weights(physics_matrix)
         
-        p1 = self.trend_expert.predict_proba(X) # Hybrid handles scaling internally for now to match fit
+        p1 = self.trend_expert.predict_proba(base_df) # Hybrid handles scaling internally for now to match fit
         p2 = self.range_expert.predict_proba(X_scaled)
         p3 = self.stress_expert.predict_proba(X_scaled)
-        
+        base_weights = weights[:, :3]
+        base_weights = base_weights / base_weights.sum(axis=1, keepdims=True)
+        base_only = (
+            base_weights[:, [0]] * p1 + base_weights[:, [1]] * p2 + base_weights[:, [2]] * p3
+        )
         blended = weights[:, [0]] * p1 + weights[:, [1]] * p2 + weights[:, [2]] * p3
+
+        self._last_cnn_stats = {"weight_mean": 0.0, "delta_mean": 0.0, "delta_std": 0.0}
+        if self._cnn_enabled and self.cnn_expert is not None and self.cnn_feature_columns_:
+            cnn_df = df[self.cnn_feature_columns_]
+            cnn_probs = self.cnn_expert.predict_proba(cnn_df)
+            fallback = np.column_stack([1.0 - base_only[:, 1], base_only[:, 1]])
+            invalid = ~np.isfinite(cnn_probs[:, 1])
+            if invalid.any():
+                cnn_probs[invalid] = fallback[invalid]
+            blended += weights[:, [3]] * cnn_probs
+            delta = blended[:, 1] - base_only[:, 1]
+            self._last_cnn_stats = {
+                "weight_mean": float(np.mean(weights[:, 3])),
+                "delta_mean": float(np.mean(delta)),
+                "delta_std": float(np.std(delta)),
+            }
         return blended
 
     def predict(self, X) -> np.ndarray:
@@ -215,17 +344,26 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
 
     def get_expert_telemetry(self, X: pd.DataFrame) -> Dict[str, float]:
         """New Telemetry Method: Returns expert activation stats."""
-        if not self._fitted: return {}
-        df = _as_dataframe(X)
-        physics_matrix = df.loc[:, self.physics_features].to_numpy(dtype=float)
+        if not self._fitted:
+            return {}
+        df = _as_dataframe(X).copy()
+        base_df = df.drop(columns=self.cnn_feature_columns_, errors="ignore")
+        physics_cols = _ensure_columns(base_df, self.physics_features)
+        physics_matrix = base_df.loc[:, physics_cols].to_numpy(dtype=float)
         weights = self._gating_weights(physics_matrix)
         
         activation = weights.mean(axis=0)
         confidence = np.max(weights, axis=1).mean()
-        
-        return {
+        share_cnn = float(activation[3]) if activation.shape[0] > 3 else 0.0
+        telemetry = {
             "share_trend": float(activation[0]),
             "share_range": float(activation[1]),
             "share_stress": float(activation[2]),
-            "gating_confidence": float(confidence)
+            "share_cnn": share_cnn,
+            "gating_confidence": float(confidence),
+            "cnn_weight_mean": float(self._last_cnn_stats.get("weight_mean", share_cnn)),
+            "cnn_delta_mean": float(self._last_cnn_stats.get("delta_mean", 0.0)),
+            "cnn_delta_std": float(self._last_cnn_stats.get("delta_std", 0.0)),
         }
+        
+        return telemetry

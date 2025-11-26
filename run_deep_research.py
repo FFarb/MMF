@@ -4,6 +4,7 @@ Fixes MemoryError by reducing M5 history and selecting features BEFORE global me
 """
 from __future__ import annotations
 
+import argparse
 import gc
 import shutil
 from pathlib import Path
@@ -13,12 +14,14 @@ import numpy as np
 import pandas as pd
 
 # Import Config
-from src.config import DAYS_BACK, SYMBOLS, CACHE_DIR
+from src.config import DAYS_BACK, SYMBOLS
+import src.config as cfg
 ASSET_LIST = SYMBOLS
 
 from src.features import SignalFactory
 from src.features.advanced_stats import apply_rolling_physics
 from src.features.alpha_council import AlphaCouncil
+from src.features.tensor_flex import TensorFlexFeatureRefiner
 from src.models.moe_ensemble import MixtureOfExpertsEnsemble
 from src.training.meta_controller import TrainingScheduler
 from src.data_loader import MarketDataLoader
@@ -40,6 +43,42 @@ def _build_labels(df: pd.DataFrame) -> pd.Series:
         forward_ret = df['close'].shift(-LABEL_LOOKAHEAD) / df['close'] - 1.0
     y = (forward_ret > LABEL_THRESHOLD).astype(int)
     return y
+
+
+def _load_or_fit_tensor_flex(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    force_retrain: bool = False,
+) -> TensorFlexFeatureRefiner:
+    """
+    Load existing Tensor-Flex artifacts or fit a new refiner.
+    """
+    artifacts_dir = Path(cfg.TENSOR_FLEX_ARTIFACTS_DIR)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    artifact_file = artifacts_dir / "tensor_flex.joblib"
+
+    if cfg.TENSOR_FLEX_LOAD_IF_AVAILABLE and artifact_file.exists() and not force_retrain:
+        try:
+            refiner = TensorFlexFeatureRefiner.load(artifacts_dir)
+            print(f"[Tensor-Flex] Loaded existing refiner from {artifact_file}")
+            return refiner
+        except Exception as exc:
+            print(f"[Tensor-Flex] Failed to load existing Tensor-Flex artifacts ({exc}). Re-training...")
+
+    refiner = TensorFlexFeatureRefiner(
+        max_cluster_size=cfg.TENSOR_FLEX_MAX_CLUSTER_SIZE,
+        max_pairs_per_cluster=cfg.TENSOR_FLEX_MAX_PAIRS_PER_CLUSTER,
+        variance_threshold=cfg.TENSOR_FLEX_VARIANCE_THRESHOLD,
+        n_splits_stability=cfg.TENSOR_FLEX_N_SPLITS_STABILITY,
+        stability_threshold=cfg.TENSOR_FLEX_STABILITY_THRESHOLD,
+        selector_coef_threshold=cfg.TENSOR_FLEX_SELECTOR_COEF_THRESHOLD,
+        selector_c=cfg.TENSOR_FLEX_SELECTOR_C,
+        random_state=cfg.TENSOR_FLEX_RANDOM_STATE,
+        artifacts_dir=artifacts_dir,
+    )
+    refiner.fit(X_train, y_train)
+    print(f"[Tensor-Flex] Trained refiner with {len(refiner.selected_feature_names_)} distilled features.")
+    return refiner
 
 def cleanup_temp_dir():
     if TEMP_DIR.exists():
@@ -108,7 +147,11 @@ def process_single_asset(symbol: str, asset_idx: int, loader: MarketDataLoader, 
         print(f"       [ERROR] {symbol}: {e}")
         return None
 
-def run_pipeline() -> None:
+def run_pipeline(
+    use_tensor_flex: Optional[bool] = None,
+    tensor_flex_train_only: bool = False,
+    tensor_flex_force_retrain: bool = False,
+) -> None:
     print("=" * 72)
     print("          MULTI-ASSET NEURO-SYMBOLIC TRADING SYSTEM")
     print("          (Smart Horizon & Scout Assembly Mode)")
@@ -240,6 +283,66 @@ def run_pipeline() -> None:
     split = int(len(X) * 0.8)
     X_train, X_test = X.iloc[:split], X.iloc[split:]
     y_train, y_test = y.iloc[:split], y.iloc[split:]
+
+    tensor_flex_enabled = cfg.USE_TENSOR_FLEX if use_tensor_flex is None else use_tensor_flex
+    passthrough_cols: List[str] = []
+    for col in ("asset_id",):
+        if col in X.columns:
+            passthrough_cols.append(col)
+    for col in available_physics:
+        if col in X.columns and col not in passthrough_cols:
+            passthrough_cols.append(col)
+    tensor_feature_cols = [col for col in X.columns if col not in passthrough_cols]
+    tensor_flex_refiner: Optional[TensorFlexFeatureRefiner] = None
+
+    if tensor_flex_enabled and tensor_feature_cols:
+        print(f"[Tensor-Flex] Preparing distillation on {len(tensor_feature_cols)} raw features...")
+        X_train_tensor = X_train[tensor_feature_cols].copy()
+        X_test_tensor = X_test[tensor_feature_cols].copy()
+        tensor_flex_refiner = _load_or_fit_tensor_flex(
+            X_train_tensor,
+            y_train,
+            force_retrain=tensor_flex_force_retrain,
+        )
+        if tensor_flex_train_only:
+            artifacts_dir = Path(cfg.TENSOR_FLEX_ARTIFACTS_DIR)
+            print(f"[Tensor-Flex] Train-only mode complete. Artifacts stored at {artifacts_dir.resolve()}")
+            cleanup_temp_dir()
+            return
+        X_train_tf = tensor_flex_refiner.transform(X_train_tensor, mode="selected")
+        X_test_tf = tensor_flex_refiner.transform(X_test_tensor, mode="selected")
+        cnn_train = None
+        cnn_test = None
+        if cfg.CNN_USE:
+            X_train_tf_full = tensor_flex_refiner.transform(X_train_tensor, mode="full_latents")
+            X_test_tf_full = tensor_flex_refiner.transform(X_test_tensor, mode="full_latents")
+            cnn_train = X_train_tf_full.add_prefix(cfg.CNN_LATENT_PREFIX)
+            cnn_test = X_test_tf_full.add_prefix(cfg.CNN_LATENT_PREFIX)
+        passthrough_train = X_train[passthrough_cols].copy()
+        passthrough_test = X_test[passthrough_cols].copy()
+        X_train = pd.concat([X_train_tf, passthrough_train], axis=1)
+        X_test = pd.concat([X_test_tf, passthrough_test], axis=1)
+        if cnn_train is not None and cnn_test is not None:
+            X_train = pd.concat([X_train, cnn_train], axis=1)
+            X_test = pd.concat([X_test, cnn_test], axis=1)
+            print(
+                f"[Tensor-Flex] Routed {cnn_train.shape[1]} raw latents to the Temporal CNN expert "
+                "alongside distilled controls."
+            )
+        elif cfg.CNN_USE:
+            print("[Tensor-Flex] CNN expert requested but no Tensor-Flex latents are available. CNN disabled.")
+        print(
+            f"[Tensor-Flex] Distilled feature space: {X_train_tf.shape[1]} latents + "
+            f"{len(passthrough_cols)} passthrough controls."
+        )
+    elif tensor_flex_enabled and not tensor_feature_cols:
+        print("[Tensor-Flex] Skipping refinement because no eligible features remain after passthrough filtering.")
+    elif tensor_flex_train_only:
+        print("[Tensor-Flex] Train-only mode requested but Tensor-Flex is disabled in config. Exiting early.")
+        cleanup_temp_dir()
+        return
+    elif cfg.CNN_USE:
+        print("[CNN] Temporal CNN expert disabled because Tensor-Flex preprocessing is not active.")
     
     scheduler = TrainingScheduler()
     e_col = "entropy_200" if "entropy_200" in X.columns else X.columns[0]
@@ -269,6 +372,15 @@ def run_pipeline() -> None:
     # ------------------------------------------------------------------ #
     print("\n[5] VALIDATION & SNAPSHOT")
     probs = moe.predict_proba(X_test)[:, 1]
+    telemetry = moe.get_expert_telemetry(X_test)
+    if telemetry:
+        print(
+            f"    [MoE] Gating Shares - Trend: {telemetry.get('share_trend', 0):.1%}, "
+            f"Range: {telemetry.get('share_range', 0):.1%}, "
+            f"Stress: {telemetry.get('share_stress', 0):.1%}, "
+            f"CNN: {telemetry.get('share_cnn', 0):.1%} | "
+            f"CNN weight mean: {telemetry.get('cnn_weight_mean', 0):.3f}"
+        )
     
     artifacts = Path("artifacts")
     artifacts.mkdir(exist_ok=True)
@@ -282,4 +394,37 @@ def run_pipeline() -> None:
     cleanup_temp_dir()
 
 if __name__ == "__main__":
-    run_pipeline()
+    parser = argparse.ArgumentParser(description="Run the QFC deep research pipeline.")
+    parser.add_argument(
+        "--use-tensor-flex",
+        action="store_true",
+        help="Force Tensor-Flex preprocessing even if disabled in config.",
+    )
+    parser.add_argument(
+        "--no-tensor-flex",
+        action="store_true",
+        help="Disable Tensor-Flex preprocessing even if enabled in config.",
+    )
+    parser.add_argument(
+        "--tensor-flex-train-only",
+        action="store_true",
+        help="Fit Tensor-Flex artifacts only and exit before training trading models.",
+    )
+    parser.add_argument(
+        "--tensor-flex-force-retrain",
+        action="store_true",
+        help="When set, ignore cached Tensor-Flex artifacts and retrain from scratch.",
+    )
+    args = parser.parse_args()
+
+    use_tensor_flex_arg: Optional[bool] = None
+    if args.use_tensor_flex:
+        use_tensor_flex_arg = True
+    elif args.no_tensor_flex:
+        use_tensor_flex_arg = False
+
+    run_pipeline(
+        use_tensor_flex=use_tensor_flex_arg,
+        tensor_flex_train_only=args.tensor_flex_train_only,
+        tensor_flex_force_retrain=args.tensor_flex_force_retrain,
+    )
