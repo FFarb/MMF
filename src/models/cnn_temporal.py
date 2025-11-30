@@ -19,6 +19,7 @@ from sklearn.preprocessing import StandardScaler
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     from torch.utils.data import DataLoader, TensorDataset
 except ImportError as exc:  # pragma: no cover - handled at runtime
     torch = None
@@ -41,34 +42,47 @@ def _check_torch_available() -> None:
         ) from TORCH_IMPORT_ERROR
 
 
-class TemporalConvBlock(nn.Module):
-    """Residual temporal convolution block with dilation."""
 
-    def __init__(self, channels: int, dilation: int, dropout: float) -> None:
+class TemporalConvBlock(nn.Module):
+    """Residual temporal convolution block with causal dilation."""
+
+    def __init__(self, channels: int, dilation: int, dropout: float, kernel_size: int = 3) -> None:
         super().__init__()
-        padding = dilation
-        self.conv1 = nn.Conv1d(channels, channels, kernel_size=3, padding=padding, dilation=dilation)
+        # For causality: we'll pad manually on the left side only
+        self.dilation = dilation
+        self.kernel_size = kernel_size
+        # Causal padding: (kernel_size - 1) * dilation on the left
+        self.padding = (self.kernel_size - 1) * dilation
+        
+        # No padding in Conv1d - we'll handle it manually
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=0, dilation=dilation)
         self.norm1 = nn.BatchNorm1d(channels)
         self.act1 = nn.GELU()
         self.drop1 = nn.Dropout(dropout)
 
-        self.conv2 = nn.Conv1d(channels, channels, kernel_size=3, padding=padding, dilation=dilation)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=0, dilation=dilation)
         self.norm2 = nn.BatchNorm1d(channels)
         self.act2 = nn.GELU()
         self.drop2 = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
-        x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.act1(x)
-        x = self.drop1(x)
+        
+        # First conv with causal padding
+        out = F.pad(x, (self.padding, 0))  # Pad left only
+        out = self.conv1(out)
+        out = self.norm1(out)
+        out = self.act1(out)
+        out = self.drop1(out)
 
-        x = self.conv2(x)
-        x = self.norm2(x)
-        x = self.act2(x)
-        x = self.drop2(x)
-        return x + residual
+        # Second conv with causal padding
+        out = F.pad(out, (self.padding, 0))  # Pad left only
+        out = self.conv2(out)
+        out = self.norm2(out)
+        out = self.act2(out)
+        out = self.drop2(out)
+        
+        return out + residual
 
 
 class ChannelAttention(nn.Module):
@@ -105,6 +119,7 @@ class TemporalConvNet(nn.Module):
         hidden_dim: int = 64,
         n_outputs: int = 1,
         use_attention: bool = True,
+        kernel_size: int = 3,
     ) -> None:
         super().__init__()
         self.input_proj = nn.Sequential(
@@ -112,7 +127,7 @@ class TemporalConvNet(nn.Module):
             nn.GELU(),
         )
         self.blocks = nn.ModuleList(
-            [TemporalConvBlock(mid_channels, dilation=d, dropout=dropout) for d in dilations]
+            [TemporalConvBlock(mid_channels, dilation=d, dropout=dropout, kernel_size=kernel_size) for d in dilations]
         )
         self.attention = ChannelAttention(mid_channels) if use_attention else None
         self.output_head = nn.Sequential(
@@ -153,6 +168,8 @@ class CNNExpert(BaseEstimator, ClassifierMixin):
     artifacts_path: Optional[Path | str] = None
     dilations: Sequence[int] = field(default_factory=lambda: (1, 2, 4, 8, 16, 32))
     use_attention: bool = True
+    weight_decay: float = 1e-2
+    kernel_size: int = 3
 
     def __post_init__(self) -> None:
         if isinstance(self.artifacts_path, (str, Path)):
@@ -163,7 +180,7 @@ class CNNExpert(BaseEstimator, ClassifierMixin):
         self.model_: Optional[TemporalConvNet] = None
         self.feature_names_: List[str] = []
         self.device_ = None
-        self.loss_history_: List[float] = []
+        self.loss_history_: List[Tuple[float, float]] = []  # (train_loss, val_loss)
 
     # ------------------------------------------------------------------ #
     # Sklearn API
@@ -177,35 +194,63 @@ class CNNExpert(BaseEstimator, ClassifierMixin):
             )
         self._set_random_state()
         self.feature_names_ = list(df.columns)
+        
+        # FIX: Split BEFORE scaling to prevent data leakage
+        val_len = max(1, int(0.2 * df.shape[0]))
+        train_len = df.shape[0] - val_len
+        
+        if train_len < self.window_length:
+            raise ValueError(f"Training set too small ({train_len} < {self.window_length}).")
+        
+        # Split data temporally (time-series split)
+        df_train = df.iloc[:train_len]
+        df_val = df.iloc[train_len:]
+        y_train = target.iloc[:train_len]
+        y_val = target.iloc[train_len:]
+        
+        # FIX: Fit scaler ONLY on training data
         self.scaler_ = StandardScaler()
-        scaled = self.scaler_.fit_transform(df.values).astype(np.float32)
-        windows, labels, _ = self._build_windows(scaled, target.values)
-        dataset = TensorDataset(
-            torch.from_numpy(windows),
-            torch.from_numpy(labels.astype(np.float32)).unsqueeze(1),
+        scaled_train = self.scaler_.fit_transform(df_train.values).astype(np.float32)
+        scaled_val = self.scaler_.transform(df_val.values).astype(np.float32)
+        
+        # Build windows
+        windows_train, labels_train, _ = self._build_windows(scaled_train, y_train.values)
+        windows_val, labels_val, _ = self._build_windows(scaled_val, y_val.values)
+        
+        if len(windows_train) == 0:
+            raise ValueError("Not enough training windows after windowing.")
+        
+        train_ds = TensorDataset(
+            torch.from_numpy(windows_train),
+            torch.from_numpy(labels_train.astype(np.float32)).unsqueeze(1),
         )
-        val_len = max(1, int(0.2 * len(dataset)))
-        train_len = len(dataset) - val_len
-        if train_len == 0:
-            raise ValueError("Not enough CNN training windows after validation split.")
-        generator = torch.Generator().manual_seed(self.random_state)
-        train_ds, val_ds = torch.utils.data.random_split(dataset, [train_len, val_len], generator=generator)
+        val_ds = TensorDataset(
+            torch.from_numpy(windows_val),
+            torch.from_numpy(labels_val.astype(np.float32)).unsqueeze(1),
+        )
 
         train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
         val_loader = DataLoader(val_ds, batch_size=self.batch_size, shuffle=False)
 
         self.device_ = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_ = TemporalConvNet(
-            n_channels=windows.shape[1],  # Dynamically set from input windows [Batch, Channels, Length]
+            n_channels=windows_train.shape[1],  # Dynamically set from input windows [Batch, Channels, Length]
             mid_channels=self.mid_channels,
             dilations=self.dilations,
             dropout=self.dropout,
             hidden_dim=self.hidden_dim,
             n_outputs=1,
             use_attention=self.use_attention,
+            kernel_size=self.kernel_size,
         ).to(self.device_)
 
-        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.lr)
+        optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        
+        # FIX: Add LR Scheduler
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=3
+        )
+        
         criterion = nn.BCEWithLogitsLoss()
         best_state = None
         best_loss = math.inf
@@ -214,8 +259,8 @@ class CNNExpert(BaseEstimator, ClassifierMixin):
 
         logger.info(
             "CNNExpert training with %s windows (%s val), params=%s",
-            train_len,
-            val_len,
+            len(train_ds),
+            len(val_ds),
             sum(p.numel() for p in self.model_.parameters()),
         )
 
@@ -231,9 +276,21 @@ class CNNExpert(BaseEstimator, ClassifierMixin):
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item() * batch_x.size(0)
-            epoch_loss /= max(1, train_len)
+            epoch_loss /= max(1, len(train_ds))
+            
             val_loss = self._evaluate_loss(val_loader, criterion)
-            self.loss_history_.append(val_loss)
+            self.loss_history_.append((epoch_loss, val_loss))
+            
+            # Step scheduler
+            scheduler.step(val_loss)
+            current_lr = optimizer.param_groups[0]['lr']
+            
+            # Log progress every 5 epochs
+            if (epoch + 1) % 5 == 0 or epoch == 0:
+                logger.info(
+                    "Epoch %d/%d: train_loss=%.5f, val_loss=%.5f, lr=%.6f",
+                    epoch + 1, self.epochs, epoch_loss, val_loss, current_lr
+                )
 
             if val_loss < best_loss - 1e-4:
                 best_loss = val_loss
@@ -320,6 +377,8 @@ class CNNExpert(BaseEstimator, ClassifierMixin):
                 "patience": self.patience,
                 "dilations": tuple(self.dilations),
                 "use_attention": self.use_attention,
+                "weight_decay": self.weight_decay,
+                "kernel_size": self.kernel_size,
             },
         }
         torch.save(payload, artifact)
@@ -347,6 +406,7 @@ class CNNExpert(BaseEstimator, ClassifierMixin):
             hidden_dim=expert.hidden_dim,
             n_outputs=1,
             use_attention=expert.use_attention,
+            kernel_size=expert.kernel_size,
         )
         expert.model_.load_state_dict(payload["state_dict"])
         expert.model_.to(expert.device_)

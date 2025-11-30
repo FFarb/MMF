@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Sequence, Optional
+from typing import Dict, List, Sequence, Optional, Any
 
 import numpy as np
 import pandas as pd
@@ -79,6 +79,7 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
     learning_rate: float = 0.05
     max_depth: int = 3
     random_state: int = 42
+    n_assets: int = 1
     
     def __post_init__(self) -> None:
         self.analyst = GradientBoostingClassifier(
@@ -120,7 +121,7 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
             
             self.visionary = TorchSklearnWrapper(
                 n_features=n_features,
-                n_assets=NUM_ASSETS,
+                n_assets=self.n_assets,
                 sequence_length=seq_len,
                 random_state=self.random_state
             )
@@ -166,7 +167,15 @@ class HybridTrendExpert(BaseEstimator, ClassifierMixin):
 
 @dataclass
 class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
-    physics_features: Sequence[str] = field(default_factory=lambda: ("hurst_200", "entropy_200", "fdi_200"))
+    physics_features: Sequence[str] = field(
+        default_factory=lambda: (
+            "hurst_200",
+            "entropy_200",
+            "fdi_200",
+            "stability_theta",
+            "stability_acf",
+        )
+    )
     random_state: int = 42
     trend_estimators: int = 300
     gating_epochs: int = 500
@@ -182,9 +191,15 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
     cnn_fill_strategy: str = CNN_FILL_EARLY
     cnn_artifacts_dir: Optional[Path | str] = CNN_ARTIFACTS_DIR
     cnn_latent_prefix: str = CNN_LATENT_PREFIX
+    cnn_params: Optional[Dict[str, Any]] = None
+    n_assets: int = 1
 
     def __post_init__(self) -> None:
-        self.trend_expert = HybridTrendExpert(n_estimators=self.trend_estimators, random_state=self.random_state)
+        self.trend_expert = HybridTrendExpert(
+            n_estimators=self.trend_estimators, 
+            random_state=self.random_state,
+            n_assets=self.n_assets
+        )
         self.range_expert = KNeighborsClassifier(n_neighbors=15, weights="distance")
         self.stress_expert = LogisticRegression(class_weight={0: 2.0, 1: 1.0}, max_iter=500)
         self.gating_network = MLPClassifier(
@@ -219,9 +234,23 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         X_scaled = self.feature_scaler.fit_transform(numeric_df.to_numpy(dtype=float))
         y_array = np.ravel(np.asarray(y))
 
+        # Physics-Aware Sample Weighting
+        trend_sample_weight = sample_weight
+        if "stability_warning" in base_df.columns:
+            print("    [MoE] Applying Physics-Guided Sample Weighting...")
+            warnings = base_df["stability_warning"].values
+            # Create weights: 1.0 for stable, 0.1 for unstable
+            physics_weights = np.ones(len(base_df))
+            physics_weights[warnings == 1] = 0.1
+            
+            if sample_weight is not None:
+                trend_sample_weight = sample_weight * physics_weights
+            else:
+                trend_sample_weight = physics_weights
+
         # Train Experts (Pass weights where supported)
         print("    [MoE] Training Experts with Smart Weights...")
-        self.trend_expert.fit(base_df, y_array, sample_weight=sample_weight)
+        self.trend_expert.fit(base_df, y_array, sample_weight=trend_sample_weight)
         self.range_expert.fit(X_scaled, y_array) # KNN doesn't support fit weights usually
         self.stress_expert.fit(X_scaled, y_array, sample_weight=sample_weight)
 
@@ -250,19 +279,27 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             logger.info("CNNExpert skipped because no temporal latent columns were provided.")
             self.cnn_expert = None
             return
+            
+        # Use tuned params if available, otherwise defaults
+        params = self.cnn_params or {}
+        
         y_series = pd.Series(y_array, index=df.index)
         cnn_df = df[self.cnn_feature_columns_].copy()
+        
         self.cnn_expert = CNNExpert(
-            window_length=self.cnn_window,
-            mid_channels=self.cnn_mid_channels,
-            hidden_dim=self.cnn_hidden_dim,
-            dropout=self.cnn_dropout,
-            lr=self.cnn_lr,
-            epochs=self.cnn_epochs,
-            batch_size=self.cnn_batch_size,
+            window_length=params.get("window_length", self.cnn_window),
+            mid_channels=params.get("mid_channels", self.cnn_mid_channels),
+            hidden_dim=params.get("hidden_dim", self.cnn_hidden_dim),
+            dropout=params.get("dropout", self.cnn_dropout),
+            lr=params.get("lr", self.cnn_lr),
+            weight_decay=params.get("weight_decay", 1e-2),
+            epochs=params.get("epochs", self.cnn_epochs),
+            batch_size=params.get("batch_size", self.cnn_batch_size),
             random_state=self.cnn_random_state,
             fill_strategy=self.cnn_fill_strategy,
             artifacts_path=self.cnn_artifacts_dir,
+            dilations=params.get("dilations", (1, 2, 4, 8, 16, 32)),
+            kernel_size=params.get("kernel_size", 3),
         )
         try:
             self.cnn_expert.fit(cnn_df, y_series)
@@ -274,7 +311,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         logger.info(
             "CNNExpert trained with %s features (window=%s).",
             cnn_df.shape[1],
-            self.cnn_window,
+            self.cnn_expert.window_length,
         )
 
     def _gating_weights(self, physics_matrix: np.ndarray) -> np.ndarray:
@@ -287,6 +324,29 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
                 weights[:, cls] = raw[:, idx]
         weights = np.clip(weights, 1e-6, None)
         weights /= weights.sum(axis=1, keepdims=True)
+
+        # Hard Gating: Physics Override
+        # If stability_theta is critically low (< 0.005), boost Stress Expert (index 2)
+        try:
+            theta_idx = list(self.physics_features).index("stability_theta")
+            theta_vals = physics_matrix[:, theta_idx]
+            
+            # Identify critical slowing down (theta -> 0)
+            critical_mask = theta_vals < 0.005
+            
+            if np.any(critical_mask):
+                # Boost Stress Expert weight
+                # We add a fixed amount to stress weight and re-normalize
+                boost_amount = 2.0  # Strong boost
+                
+                # Ensure we don't crash if index 2 (Stress) is not available (unlikely)
+                if weights.shape[1] > 2:
+                    weights[critical_mask, 2] += boost_amount
+                    weights[critical_mask] /= weights[critical_mask].sum(axis=1, keepdims=True)
+        except ValueError:
+            # stability_theta not in physics_features
+            pass
+
         if not self._cnn_enabled and weights.shape[1] > 3:
             base = weights[:, :3]
             base /= base.sum(axis=1, keepdims=True)

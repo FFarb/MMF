@@ -24,7 +24,7 @@ import pandas as pd
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.decomposition import PCA
 from sklearn.exceptions import ConvergenceWarning
-from sklearn.linear_model import Lasso, LinearRegression, LogisticRegression
+from sklearn.linear_model import Lasso, LinearRegression, LogisticRegression, RidgeClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import precision_score
 
@@ -498,33 +498,236 @@ class TensorFlexFeatureRefiner:
             index=Xj.index,
         )
 
+    def _estimate_intrinsic_dimension(
+        self,
+        X: np.ndarray,
+        p: int,
+        T: int,
+    ) -> int:
+        """
+        Three-Layer Brain for optimal dimension selection.
+        
+        Layer 1 (Physics): Marchenko-Pastur threshold to distinguish signal from noise
+        Layer 2 (Geometry): Effective Rank to capture smeared information
+        Layer 3 (Economics): Will be applied later in supervised tuning
+        
+        Parameters
+        ----------
+        X : np.ndarray
+            Data matrix (T samples x p features)
+        p : int
+            Number of features
+        T : int
+            Number of samples
+            
+        Returns
+        -------
+        int
+            Estimated intrinsic dimension (base_dim)
+        """
+        if p == 0 or T == 0:
+            return max(1, min(p, self.min_latents))
+        
+        # Compute correlation matrix and eigenvalues
+        try:
+            corr_matrix = np.corrcoef(X.T)
+            eigenvalues = np.linalg.eigvalsh(corr_matrix)
+            eigenvalues = np.sort(eigenvalues)[::-1]  # Descending order
+            eigenvalues = np.maximum(eigenvalues, 0)  # Ensure non-negative
+        except (np.linalg.LinAlgError, ValueError):
+            # Fallback for singular matrices
+            return max(1, min(p, self.min_latents))
+        
+        # Layer 1: Marchenko-Pastur Threshold
+        # λ+ = (1 + √(p/T))²
+        q = p / T if T > 0 else 1.0
+        lambda_plus = (1 + np.sqrt(q)) ** 2
+        
+        # Count eigenvalues above noise threshold
+        d_mp = np.sum(eigenvalues > lambda_plus)
+        
+        # Layer 2: Effective Rank
+        # d_eff = (Σλᵢ)² / Σλᵢ²
+        sum_eig = np.sum(eigenvalues)
+        sum_eig_sq = np.sum(eigenvalues ** 2)
+        
+        if sum_eig_sq > 0:
+            d_eff = (sum_eig ** 2) / sum_eig_sq
+        else:
+            d_eff = 1.0
+        
+        # Smart Aggregation: Smooth transition based on cluster size
+        # Small clusters (p < 20): Trust geometry more (effective rank)
+        # Large clusters (p >= 20): Trust physics more (MP threshold)
+        
+        if p < 20:
+            # Small cluster: Lean towards max(d_MP, int(d_eff))
+            # Use a weighted average with more weight on d_eff
+            base_dim = int(0.3 * d_mp + 0.7 * d_eff)
+            base_dim = max(base_dim, int(d_eff), d_mp)
+        else:
+            # Large cluster: Strictly trust d_MP
+            base_dim = d_mp
+        
+        # Ensure at least 1 component
+        base_dim = max(1, base_dim)
+        
+        # Clip to configured bounds
+        base_dim = np.clip(base_dim, self.min_latents, min(self.max_latents, p))
+        
+        return int(base_dim)
+    
+    def _supervised_dimension_tuning(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        d_base: int,
+        cluster_id: int,
+    ) -> int:
+        """
+        Layer 3 (Economics): Supervised tuning using Sharpe Proxy.
+        
+        Tests d_base and neighbors (d_base ± 1) to find the most profitable dimension.
+        
+        Parameters
+        ----------
+        X : np.ndarray
+            PCA-transformed data
+        y : np.ndarray
+            Target labels
+        d_base : int
+            Base dimension from physics/geometry
+        cluster_id : int
+            Cluster identifier for logging
+            
+        Returns
+        -------
+        int
+            Optimal dimension
+        """
+        p = X.shape[1]
+        
+        # Create candidate set: {d_base - 1, d_base, d_base + 1}
+        candidates = [
+            max(self.min_latents, d_base - 1),
+            d_base,
+            min(self.max_latents, p, d_base + 1),
+        ]
+        # Remove duplicates and sort
+        candidates = sorted(set(candidates))
+        
+        if len(y) < 100:  # Not enough data for robust CV
+            return d_base
+        
+        # Quick 2-fold CV to evaluate each candidate
+        tscv = TimeSeriesSplit(n_splits=2)
+        best_d = d_base
+        best_score = -np.inf
+        
+        for d in candidates:
+            if d > p or d < 1:
+                continue
+            
+            scores = []
+            for train_idx, val_idx in tscv.split(X):
+                X_train = X[train_idx, :d]
+                X_val = X[val_idx, :d]
+                y_train = y[train_idx]
+                y_val = y[val_idx]
+                
+                # Skip if too few samples
+                if len(X_train) < 20 or len(X_val) < 10:
+                    continue
+                
+                # Quick classifier
+                try:
+                    clf = RidgeClassifier(random_state=self.random_state)
+                    clf.fit(X_train, y_train)
+                    preds = clf.predict(X_val)
+                    
+                    # Calculate Sharpe Proxy
+                    n_trades = np.sum(preds == 1)
+                    if n_trades < 5:
+                        sharpe_proxy = -1.0
+                    else:
+                        tp = np.sum((preds == 1) & (y_val == 1))
+                        prec = tp / n_trades if n_trades > 0 else 0.0
+                        expectancy = (prec * TP_PCT) - ((1 - prec) * SL_PCT)
+                        sharpe_proxy = expectancy * np.sqrt(n_trades)
+                    
+                    scores.append(sharpe_proxy)
+                except Exception:
+                    scores.append(-1.0)
+            
+            if scores:
+                avg_score = np.mean(scores)
+                if avg_score > best_score:
+                    best_score = avg_score
+                    best_d = d
+        
+        return best_d
+    
     def _fit_cluster_latents(
         self,
         cluster_frames: Dict[int, pd.DataFrame],
         y: Optional[pd.Series],
     ) -> pd.DataFrame:
+        """
+        Fit PCA on each cluster with physics-informed dimension selection.
+        
+        Uses the Three-Layer Brain:
+        1. Physics (Marchenko-Pastur)
+        2. Geometry (Effective Rank)
+        3. Economics (Supervised Sharpe Proxy)
+        """
         latents: List[pd.DataFrame] = []
         rng = np.random.default_rng(self.random_state)
 
         for cluster_id, df in cluster_frames.items():
+            X = df.values
+            T, p = X.shape
+            
+            if p == 0:
+                continue
+            
+            # Fit full PCA
             pca = PCA(random_state=self.random_state)
-            pca.fit(df.values)
-            var_ratio = np.nan_to_num(pca.explained_variance_ratio_, nan=0.0)
-            cum = np.cumsum(var_ratio)
-            n_components = int(np.searchsorted(cum, self.variance_threshold) + 1)
-            n_components = min(n_components, df.shape[1])
-            if n_components == 0:
-                n_components = min(1, df.shape[1])
-            Z = pca.transform(df.values)[:, :n_components]
+            pca.fit(X)
+            
+            # Layer 1 & 2: Estimate intrinsic dimension
+            d_base = self._estimate_intrinsic_dimension(X, p, T)
+            
+            # Layer 3: Supervised tuning (if target available)
+            if y is not None and self.enable_dynamic_latents:
+                y_aligned = y.reindex(df.index).fillna(0).values
+                X_transformed = pca.transform(X)
+                d_optimal = self._supervised_dimension_tuning(
+                    X_transformed,
+                    y_aligned,
+                    d_base,
+                    cluster_id,
+                )
+                n_components = d_optimal
+            else:
+                # Unsupervised mode: use base dimension
+                n_components = d_base
+            
+            # Ensure valid range
+            n_components = max(1, min(n_components, p))
+            
+            # Transform to selected components
+            Z = pca.transform(X)[:, :n_components]
             latent_cols = [f"tf_cluster{cluster_id}_pc{idx+1}" for idx in range(n_components)]
             latent_df = pd.DataFrame(Z, columns=latent_cols, index=df.index)
             latents.append(latent_df)
+            
+            # Store PCA and metadata
             self.cluster_pca_[cluster_id] = pca
             self.cluster_components_[cluster_id] = n_components
             self.cluster_latent_names_[cluster_id] = latent_cols
 
         rng.shuffle(latents)
-        latents_df = pd.concat(latents, axis=1)
+        latents_df = pd.concat(latents, axis=1) if latents else pd.DataFrame()
         return latents_df
 
         return selector, selector_type, selected, stability_scores, coef_map

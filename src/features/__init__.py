@@ -17,6 +17,7 @@ from ..config import DAYS_BACK, FEATURE_STORE
 from ..data_loader import MarketDataLoader
 from .advanced_stats import (
     apply_rolling_physics,
+    apply_stability_physics,
     calculate_fdi,
     calculate_hurst_rs,
     calculate_shannon_entropy,
@@ -126,6 +127,7 @@ class SignalFactory:
 
         print("  [STEP C.2] Physics / Chaos Features (Numba Accelerated)")
         df = apply_rolling_physics(df, windows=[100, 200])
+        df = apply_stability_physics(df, window=168)
         for window in (100, 200):
             for feature in ("hurst", "entropy", "fdi"):
                 col = f"{feature}_{window}"

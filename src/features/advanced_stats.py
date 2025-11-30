@@ -298,4 +298,98 @@ __all__ = [
     "calculate_shannon_entropy",
     "calculate_fdi",
     "apply_rolling_physics",
+    "apply_stability_physics",
 ]
+
+
+def apply_stability_physics(
+    df: pd.DataFrame,
+    window: int = 168,
+    z_window: int = 504,  # ~3x the calculation window for robust Z-scores
+    threshold_z: float = 2.0,
+) -> pd.DataFrame:
+    """
+    Calculate physics-based stability metrics (Theta, ACF) and detect warnings.
+    
+    Migrated from StabilityMonitor (Stage 3) for production use.
+    Uses vectorized pandas operations for performance.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame with a price column (close/price/value).
+    window : int, default=168
+        Rolling window size for stability metrics (e.g., 168 hours = 1 week).
+    z_window : int, default=504
+        Rolling window for Z-score calculation (history to compare against).
+    threshold_z : float, default=2.0
+        Z-score threshold for triggering stability warnings.
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with appended columns:
+        - stability_acf: Lag-1 Autocorrelation
+        - stability_theta: Mean reversion speed (Ornstein-Uhlenbeck)
+        - stability_warning: 1 if unstable (High ACF or Low Theta), 0 otherwise
+    """
+    # Select price series
+    prices = _select_price_column(df)
+    
+    # Pre-calculate lagged series for vectorization
+    # x_t (Predictor) -> prices.shift(1)
+    # x_t+1 (Target)  -> prices
+    lagged = prices.shift(1)
+    
+    # 1. Calculate Rolling Lag-1 Autocorrelation (ACF)
+    # corr(x_t, x_{t-1}) over the window
+    stability_acf = prices.rolling(window=window).corr(lagged)
+    
+    # 2. Calculate Rolling Dynamic Theta (OU Process)
+    # Model: x_{t+1} = alpha + beta * x_t + epsilon
+    # beta = Cov(x_{t+1}, x_t) / Var(x_t)
+    # theta = -ln(beta) / dt (assuming dt=1)
+    
+    rolling_cov = prices.rolling(window=window).cov(lagged)
+    rolling_var = lagged.rolling(window=window).var()
+    
+    # Avoid division by zero
+    beta = rolling_cov / rolling_var.replace(0, np.nan)
+    
+    # Calculate Theta: -log(beta)
+    # If beta <= 0 or beta >= 1, theta is effectively 0 (critical/unstable)
+    # We clip beta to (0, 1) for the log calculation, then handle edge cases
+    beta_clipped = beta.clip(lower=1e-6, upper=1.0 - 1e-6)
+    stability_theta = -np.log(beta_clipped)
+    
+    # Set Theta to 0 where beta was out of bounds (non-mean-reverting)
+    mask_unstable = (beta <= 0) | (beta >= 1.0)
+    stability_theta[mask_unstable] = 0.0
+    
+    # 3. Calculate Z-scores for Warning Detection
+    # Z = (Value - Mean) / Std
+    
+    # ACF Z-score (Rising ACF is bad)
+    acf_mean = stability_acf.rolling(window=z_window, min_periods=window).mean()
+    acf_std = stability_acf.rolling(window=z_window, min_periods=window).std()
+    z_acf = (stability_acf - acf_mean) / acf_std.replace(0, 1e-9)
+    
+    # Theta Z-score (Falling Theta is bad)
+    theta_mean = stability_theta.rolling(window=z_window, min_periods=window).mean()
+    theta_std = stability_theta.rolling(window=z_window, min_periods=window).std()
+    z_theta = (stability_theta - theta_mean) / theta_std.replace(0, 1e-9)
+    
+    # 4. Generate Warnings
+    # Warning if ACF spikes (Z > threshold) OR Theta drops (Z < -threshold)
+    warning_acf = z_acf > threshold_z
+    warning_theta = z_theta < -threshold_z
+    
+    stability_warning = (warning_acf | warning_theta).astype(int)
+    
+    # Append to DataFrame
+    result = df.copy()
+    result["stability_acf"] = stability_acf.astype(np.float32).fillna(0)
+    result["stability_theta"] = stability_theta.astype(np.float32).fillna(0)
+    result["stability_warning"] = stability_warning.astype(np.int32).fillna(0)
+    
+    return result
