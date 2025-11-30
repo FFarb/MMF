@@ -1,0 +1,30 @@
+========================================================================
+MEMORY-ROBUST TRAINING PIPELINE REPORT
+========================================================================
+
+Optimal d: 0.750
+Assets: BTCUSDT, ETHUSDT, XRPUSDT
+Folds: 5
+Total Samples: 10233
+
+AGGREGATE METRICS
+------------------------------------------------------------------------
+Average Precision:       0.3900
+Average Precision (5th): 0.3562
+Average Expectancy:      0.001700
+Average Expectancy (5th): 0.000685
+
+BASELINE COMPARISON
+------------------------------------------------------------------------
+Baseline (d=1.0) Expectancy: -0.001300
+FracDiff (d~0.75) Expectancy: 0.001700
+Improvement: 230.79%
+
+PER-FOLD RESULTS
+------------------------------------------------------------------------
+ fold  train_size  val_size  precision_mean  precision_5th  recall_mean  expectancy_mean  expectancy_5th
+    1        1708      1705        0.466969       0.426552     0.213214         0.004009        0.002797
+    2        3413      1705        0.386094       0.347656     0.146542         0.001583        0.000430
+    3        5118      1705        0.549644       0.512857     0.251039         0.006489        0.005386
+    4        6823      1705        0.177161       0.148373     0.105754        -0.004685       -0.005549
+    5        8528      1705        0.370186       0.345322     0.514400         0.001106        0.000360

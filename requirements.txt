@@ -10,3 +10,4 @@ fastparquet>=2023.0.0
 hmmlearn>=0.3.0
 torch>=2.0.0
 xgboost>=1.7.0
+statsmodels>=0.14.0
