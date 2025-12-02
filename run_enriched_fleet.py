@@ -317,37 +317,360 @@ def run_enriched_fleet_training(
     
     print(f"\n  ✓ Market factor injected into all {len(asset_data)} assets")
     
-    # Step 5-7: Cluster-Based Training
-    # NOTE: Copy Steps 5-7 from run_hierarchical_fleet.py (lines 343-700)
-    # This includes:
-    # - Step 5: Cluster-based data preparation
-    # - Step 6: Cross-validation training with MoE
-    # - Step 7: Telemetry and reporting
-    
-    # For now, return the enriched data
+    # Step 5: Prepare Data for Training (Per-Cluster)
     print("\n" + "=" * 72)
-    print("ENRICHED DATA PREPARATION COMPLETE")
+    print("STEP 5: CLUSTER-BASED TRAINING DATA PREPARATION")
     print("=" * 72)
-    print(f"\nAssets loaded: {len(asset_data)}")
-    print(f"Clusters formed: {n_clusters}")
-    print(f"Dominant cluster: {cluster_result.dominant_cluster_id}")
     
-    # Show microstructure feature summary for first asset
-    first_asset = list(asset_data.keys())[0]
-    micro_cols = [c for c in asset_data[first_asset].columns if c.startswith('micro_')]
-    if len(micro_cols) > 0:
-        print(f"\n[Microstructure Features] Found {len(micro_cols)} features:")
-        for col in micro_cols:
-            print(f"  - {col}")
+    cluster_datasets = {}
+    per_asset_results = {}
+    
+    for cluster_id, members in cluster_result.cluster_members.items():
+        print(f"\n[Cluster {cluster_id}] Preparing data for: {', '.join(sorted(members))}")
         
-        print(f"\n[Sample] {first_asset} microstructure summary:")
-        summarize_microstructure(asset_data[first_asset][micro_cols])
+        cluster_dfs = []
+        
+        for asset_symbol in members:
+            if asset_symbol not in asset_data:
+                continue
+            
+            df = asset_data[asset_symbol].copy()
+            
+            # Z-Score Normalization (per asset)
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            exclude_cols = ['close', 'volume', 'frac_diff', 'market_factor']
+            # Also exclude microstructure features from normalization
+            exclude_cols.extend([c for c in df.columns if c.startswith('micro_')])
+            norm_cols = [c for c in numeric_cols if c not in exclude_cols]
+            
+            for col in norm_cols:
+                mean = df[col].mean()
+                std = df[col].std()
+                if std > 1e-8:
+                    df[col] = (df[col] - mean) / std
+            
+            # Calculate Energy
+            energy = calculate_energy(df)
+            df['energy'] = energy
+            
+            # Add Asset ID
+            df['asset_id'] = asset_symbol
+            
+            # Build Labels
+            y = build_labels(df)
+            df['target'] = y
+            
+            # Remove NaNs
+            valid_mask = ~y.isna() & ~df['frac_diff'].isna() & ~df['market_factor'].isna()
+            df_clean = df.loc[valid_mask].copy()
+            
+            if len(df_clean) < 100:
+                print(f"    ⚠️  {asset_symbol}: Insufficient valid samples ({len(df_clean)}), skipping...")
+                continue
+            
+            print(f"    {asset_symbol:12s}: {len(df_clean)} samples, {df_clean['target'].mean():.2%} positive")
+            
+            cluster_dfs.append(df_clean)
+            per_asset_results[asset_symbol] = []
+        
+        if len(cluster_dfs) == 0:
+            print(f"    ⚠️  No valid data for Cluster {cluster_id}")
+            continue
+        
+        # Combine cluster data (Panel Data structure)
+        cluster_df = pd.concat(cluster_dfs, ignore_index=False)
+        
+        # Sort by timestamp and asset_id (Panel Data structure)
+        if 'timestamp' not in cluster_df.columns:
+            cluster_df = cluster_df.reset_index()
+            if 'index' in cluster_df.columns and cluster_df['index'].dtype == 'datetime64[ns]':
+                cluster_df.rename(columns={'index': 'timestamp'}, inplace=True)
+            elif isinstance(cluster_df.index, pd.DatetimeIndex):
+                cluster_df['timestamp'] = cluster_df.index
+        
+        cluster_df.sort_values(by=['timestamp', 'asset_id'], inplace=True)
+        cluster_df.reset_index(drop=True, inplace=True)
+        
+        print(f"    ✓ Cluster {cluster_id}: {len(cluster_df)} total samples (Panel Data structure)")
+        
+        cluster_datasets[cluster_id] = cluster_df
     
-    print("\n[ENRICHED FLEET] Data loading complete!")
-    print("Next: Add cluster-based training logic from run_hierarchical_fleet.py")
-    print("Expected: H1 precision (~58%) + M5 microstructure insights")
+    # Step 6: Cluster-Based Cross-Validation Training
+    print("\n" + "=" * 72)
+    print(f"STEP 6: ENRICHED TRAINING ({n_folds} Folds per Cluster)")
+    print("H1 Targets + M5 Microstructure Hints")
+    print("=" * 72)
     
-    return asset_data, cluster_result
+    # Load CNN params
+    cnn_params = None
+    best_params_path = Path("artifacts/best_cnn_params.json")
+    if best_params_path.exists():
+        with open(best_params_path, "r") as f:
+            cnn_params = json.load(f)
+        print(f"\n[CNN] Loaded tuned params: {cnn_params}")
+    
+    all_results = []
+    cluster_results = {}
+    
+    for cluster_id, cluster_df in cluster_datasets.items():
+        print(f"\n{'=' * 72}")
+        print(f"CLUSTER {cluster_id} ENRICHED TRAINING")
+        print(f"{'=' * 72}")
+        
+        members = cluster_result.cluster_members[cluster_id]
+        is_dominant = cluster_id == cluster_result.dominant_cluster_id
+        
+        print(f"Assets: {', '.join(sorted(members))}")
+        print(f"Dominant: {'YES' if is_dominant else 'NO'}")
+        print(f"Samples: {len(cluster_df)}")
+        
+        # Check for microstructure features
+        micro_cols = [c for c in cluster_df.columns if c.startswith('micro_')]
+        if len(micro_cols) > 0:
+            print(f"Microstructure Features: {len(micro_cols)}")
+        
+        # Extract features and labels
+        timestamp_col = cluster_df['timestamp'].copy()
+        X = cluster_df.drop(columns=['target', 'close', 'volume', 'timestamp'], errors='ignore')
+        y = cluster_df['target']
+        energy_weights = cluster_df['energy'].values
+        
+        # Feature partitioning
+        available_physics = [c for c in PHYSICS_COLUMNS if c in X.columns]
+        stability_cols = ["stability_theta", "stability_acf", "stability_warning"]
+        available_physics.extend([c for c in stability_cols if c in X.columns])
+        
+        # Microstructure features are passthrough (don't apply TensorFlex to them)
+        passthrough_cols = available_physics + ["frac_diff", "market_factor", "asset_id", "energy"] + micro_cols
+        tensor_feature_cols = [c for c in X.columns if c not in passthrough_cols]
+        
+        print(f"\n[Features] Total: {len(X.columns)}")
+        print(f"[Features] Passthrough: {len(passthrough_cols)} (includes {len(micro_cols)} microstructure)")
+        print(f"[Features] Tensor-Flex Candidates: {len(tensor_feature_cols)}")
+        
+        # Cross-validation
+        tscv = TimeSeriesSplit(n_splits=n_folds)
+        fold_results = []
+        
+        for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X), start=1):
+            print(f"\n{'─' * 72}")
+            print(f"CLUSTER {cluster_id} - FOLD {fold_idx}/{n_folds}")
+            print(f"{'─' * 72}")
+            
+            X_train_raw = X.iloc[train_idx]
+            X_val_raw = X.iloc[val_idx]
+            y_train = y.iloc[train_idx]
+            y_val = y.iloc[val_idx]
+            energy_train = energy_weights[train_idx]
+            
+            print(f"Train: {len(X_train_raw)} samples | Val: {len(X_val_raw)} samples")
+            
+            # Tensor-Flex Refinement
+            print(f"\n[Fold {fold_idx}] Tensor-Flex v2 Refinement")
+            
+            if cfg.USE_TENSOR_FLEX and tensor_feature_cols:
+                X_train_tensor = X_train_raw[tensor_feature_cols].copy()
+                X_val_tensor = X_val_raw[tensor_feature_cols].copy()
+                
+                refiner = TensorFlexFeatureRefiner(
+                    max_cluster_size=cfg.TENSOR_FLEX_MAX_CLUSTER_SIZE,
+                    max_pairs_per_cluster=cfg.TENSOR_FLEX_MAX_PAIRS_PER_CLUSTER,
+                    variance_threshold=cfg.TENSOR_FLEX_VARIANCE_THRESHOLD,
+                    n_splits_stability=cfg.TENSOR_FLEX_N_SPLITS_STABILITY,
+                    stability_threshold=cfg.TENSOR_FLEX_STABILITY_THRESHOLD,
+                    selector_coef_threshold=cfg.TENSOR_FLEX_SELECTOR_COEF_THRESHOLD,
+                    selector_c=cfg.TENSOR_FLEX_SELECTOR_C,
+                    random_state=RANDOM_SEED + fold_idx,
+                    supervised_weight=cfg.TENSOR_FLEX_SUPERVISED_WEIGHT,
+                    corr_threshold=cfg.TENSOR_FLEX_CORR_THRESHOLD,
+                    min_latents=cfg.TENSOR_FLEX_MIN_LATENTS,
+                    max_latents=cfg.TENSOR_FLEX_MAX_LATENTS,
+                )
+                
+                refiner.fit(X_train_tensor, y_train)
+                
+                X_train_tf = refiner.transform(X_train_tensor, mode="selected")
+                X_val_tf = refiner.transform(X_val_tensor, mode="selected")
+                
+                X_train = pd.concat([X_train_tf, X_train_raw[passthrough_cols]], axis=1)
+                X_val = pd.concat([X_val_tf, X_val_raw[passthrough_cols]], axis=1)
+                
+                print(f"  ✓ Refined: {len(tensor_feature_cols)} → {X_train_tf.shape[1]} latents")
+                
+                del refiner, X_train_tensor, X_val_tensor, X_train_tf, X_val_tf
+                gc.collect()
+            else:
+                X_train = X_train_raw
+                X_val = X_val_raw
+            
+            # Train MoE
+            print(f"\n[Fold {fold_idx}] Cluster {cluster_id} MoE Training (Enriched)")
+            
+            sample_weights = create_physics_sample_weights(X_train, energy_train)
+            
+            moe = MixtureOfExpertsEnsemble(
+                physics_features=available_physics,
+                random_state=RANDOM_SEED,
+                use_cnn=True,
+                use_ou=True,
+                use_asset_embedding=(len(members) > 1),
+                cnn_params=cnn_params,
+                cnn_epochs=15,
+            )
+            
+            moe.fit(X_train, y_train, sample_weight=sample_weights)
+            
+            # Get predictions
+            y_pred_proba = moe.predict_proba(X_val)[:, 1]
+            y_pred = (y_pred_proba >= 0.5).astype(int)
+            
+            # Overall metrics
+            tp = ((y_pred == 1) & (y_val == 1)).sum()
+            fp = ((y_pred == 1) & (y_val == 0)).sum()
+            fn = ((y_pred == 0) & (y_val == 1)).sum()
+            tn = ((y_pred == 0) & (y_val == 0)).sum()
+            
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+            accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0.0
+            expectancy = (precision * TP_PCT) - ((1 - precision) * SL_PCT)
+            
+            print(f"\n[Fold {fold_idx}] Cluster {cluster_id} Performance:")
+            print(f"  Precision: {precision:.2%}, Recall: {recall:.2%}, F1: {f1:.2%}")
+            print(f"  Accuracy: {accuracy:.2%}, Expectancy: {expectancy:.4f}")
+            
+            # Per-asset metrics
+            if len(members) > 1:
+                print(f"\n[Fold {fold_idx}] Per-Asset Performance:")
+                
+                for asset in X_val['asset_id'].unique():
+                    asset_mask = X_val['asset_id'] == asset
+                    
+                    y_val_asset = y_val[asset_mask]
+                    y_pred_asset = y_pred[asset_mask]
+                    
+                    tp_asset = ((y_pred_asset == 1) & (y_val_asset == 1)).sum()
+                    fp_asset = ((y_pred_asset == 1) & (y_val_asset == 0)).sum()
+                    fn_asset = ((y_pred_asset == 0) & (y_val_asset == 1)).sum()
+                    
+                    prec_asset = tp_asset / (tp_asset + fp_asset) if (tp_asset + fp_asset) > 0 else 0.0
+                    rec_asset = tp_asset / (tp_asset + fn_asset) if (tp_asset + fn_asset) > 0 else 0.0
+                    exp_asset = (prec_asset * TP_PCT) - ((1 - prec_asset) * SL_PCT)
+                    
+                    print(f"  {asset:12s}: Prec={prec_asset:.2%}, Rec={rec_asset:.2%}, Exp={exp_asset:.5f}")
+                    
+                    per_asset_results[asset].append({
+                        'cluster_id': cluster_id,
+                        'fold': fold_idx,
+                        'precision': prec_asset,
+                        'recall': rec_asset,
+                        'expectancy': exp_asset,
+                    })
+            
+            fold_results.append({
+                'cluster_id': cluster_id,
+                'fold': fold_idx,
+                'precision': precision,
+                'recall': recall,
+                'f1': f1,
+                'accuracy': accuracy,
+                'expectancy': expectancy,
+            })
+            
+            del X_train, X_val, y_train, y_val, moe
+            gc.collect()
+        
+        # Cluster summary
+        cluster_df_results = pd.DataFrame(fold_results)
+        
+        print(f"\n{'=' * 72}")
+        print(f"CLUSTER {cluster_id} SUMMARY")
+        print(f"{'=' * 72}")
+        print(f"  Avg Precision: {cluster_df_results['precision'].mean():.2%}")
+        print(f"  Avg Recall:    {cluster_df_results['recall'].mean():.2%}")
+        print(f"  Avg Expectancy: {cluster_df_results['expectancy'].mean():.5f}")
+        
+        cluster_results[cluster_id] = {
+            'members': members,
+            'is_dominant': is_dominant,
+            'avg_precision': cluster_df_results['precision'].mean(),
+            'avg_recall': cluster_df_results['recall'].mean(),
+            'avg_expectancy': cluster_df_results['expectancy'].mean(),
+        }
+        
+        all_results.extend(fold_results)
+    
+    # Step 7: Final Report
+    print("\n" + "=" * 72)
+    print("STEP 7: ENRICHED FLEET REPORT")
+    print("=" * 72)
+    
+    print("\n" + "─" * 72)
+    print("CLUSTER PERFORMANCE MATRIX")
+    print("─" * 72)
+    
+    for cluster_id, stats in cluster_results.items():
+        is_dominant_str = " (DOMINANT)" if stats['is_dominant'] else ""
+        print(f"\nCluster {cluster_id}{is_dominant_str}:")
+        print(f"  Assets: {', '.join(sorted(stats['members']))}")
+        print(f"  Precision:  {stats['avg_precision']:.2%}")
+        print(f"  Recall:     {stats['avg_recall']:.2%}")
+        print(f"  Expectancy: {stats['avg_expectancy']:.5f}")
+    
+    # Per-asset summary
+    print("\n" + "─" * 72)
+    print("PER-ASSET PERFORMANCE SUMMARY")
+    print("─" * 72)
+    
+    asset_summary = []
+    for asset, results in per_asset_results.items():
+        if len(results) > 0:
+            df_asset = pd.DataFrame(results)
+            asset_summary.append({
+                'Asset': asset,
+                'Cluster': df_asset['cluster_id'].iloc[0],
+                'Precision': df_asset['precision'].mean(),
+                'Recall': df_asset['recall'].mean(),
+                'Expectancy': df_asset['expectancy'].mean(),
+                'Folds': len(results),
+            })
+    
+    if len(asset_summary) > 0:
+        summary_df = pd.DataFrame(asset_summary)
+        summary_df = summary_df.sort_values('Expectancy', ascending=False)
+        
+        print(summary_df.to_string(index=False))
+        
+        # Save results
+        artifacts_dir = Path("artifacts")
+        artifacts_dir.mkdir(exist_ok=True)
+        
+        summary_df.to_csv(artifacts_dir / "enriched_fleet_results.csv", index=False)
+        
+        print(f"\n[Artifacts] Results saved to:")
+        print(f"  - {artifacts_dir / 'enriched_fleet_results.csv'}")
+    
+    # Success criteria
+    print("\n" + "=" * 72)
+    print("ENRICHED FLEET VERIFICATION")
+    print("=" * 72)
+    
+    if len(asset_summary) > 0:
+        all_profitable = (summary_df['Expectancy'] > 0).all()
+        avg_precision = summary_df['Precision'].mean()
+        precision_pass = avg_precision > 0.55
+        
+        print(f"✓ All Assets Profitable: {'PASS' if all_profitable else 'FAIL'}")
+        print(f"✓ Avg Precision > 55%:   {'PASS' if precision_pass else 'FAIL'} ({avg_precision:.2%})")
+        
+        if all_profitable and precision_pass:
+            print("\n🎯 ENRICHED FLEET TRAINING SUCCESSFUL!")
+            print("   H1 stability + M5 microstructure = Best of both worlds!")
+        else:
+            print("\n⚠️  ENRICHED FLEET NEEDS TUNING")
+    
+    return cluster_results, summary_df if len(asset_summary) > 0 else None
 
 
 if __name__ == "__main__":
