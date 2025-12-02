@@ -173,6 +173,7 @@ def run_hierarchical_fleet_training(
     n_clusters: int = 3,
     n_folds: int = 5,
     history_days: int = 730,
+    history_days_5min: int = 0,  # NEW: Days of 5-minute data (0 = disabled)
     max_frac_diff_d: float = 0.65,
     market_factor_method: str = 'pca',
 ):
@@ -188,15 +189,29 @@ def run_hierarchical_fleet_training(
     n_folds : int
         Number of cross-validation folds
     history_days : int
-        Days of history to load per asset
+        Days of hourly history to load per asset (default: 730 = 2 years)
+    history_days_5min : int
+        Days of 5-minute history to load per asset (default: 0 = disabled)
+        Recommended: 120-180 days for 5-minute data
     max_frac_diff_d : float
         Maximum fractional differentiation order (cap)
     market_factor_method : str
         Method for market factor extraction ('pca', 'mean', 'weighted_mean')
     """
+    # Determine which interval to use
+    if history_days_5min > 0:
+        interval = "5"
+        history = history_days_5min
+        print(f"[Config] Using 5-minute data: {history} days")
+    else:
+        interval = "60"
+        history = history_days
+        print(f"[Config] Using hourly data: {history} days")
+    
     print("=" * 72)
     print("HIERARCHICAL FLEET TRAINING")
     print(f"Training {len(assets)} assets with cluster-based hierarchy")
+    print(f"Interval: {interval} minutes, History: {history} days")
     print("=" * 72)
     
     # Step 1: Load and Preprocess Data for All Assets
@@ -210,10 +225,10 @@ def run_hierarchical_fleet_training(
         print(f"\n[Fleet] Processing {asset_symbol}...")
         
         try:
-            loader = MarketDataLoader(symbol=asset_symbol, interval="60")
+            loader = MarketDataLoader(symbol=asset_symbol, interval=interval)
             factory = SignalFactory()
             
-            df_raw = loader.get_data(days_back=history_days)
+            df_raw = loader.get_data(days_back=history)
             
             if df_raw is None or len(df_raw) < 1000:
                 print(f"  ⚠️  Insufficient data for {asset_symbol}, skipping...")
@@ -505,23 +520,57 @@ def run_hierarchical_fleet_training(
             
             moe.fit(X_train, y_train, sample_weight=sample_weights)
             
-            # Get predictions
+            # Get predictions and expert telemetry
             y_pred_proba = moe.predict_proba(X_val)[:, 1]
             y_pred = (y_pred_proba >= 0.5).astype(int)
+            
+            # COMPREHENSIVE TELEMETRY: Get expert-level predictions
+            expert_telemetry = {}
+            try:
+                # Get individual expert predictions if available
+                if hasattr(moe, 'experts_'):
+                    for expert_name, expert in moe.experts_.items():
+                        try:
+                            expert_proba = expert.predict_proba(X_val)[:, 1]
+                            expert_telemetry[expert_name] = {
+                                'predictions': expert_proba,
+                                'mean_prob': float(expert_proba.mean()),
+                                'std_prob': float(expert_proba.std()),
+                            }
+                        except Exception as e:
+                            print(f"  [Warning] Could not get {expert_name} predictions: {e}")
+                
+                # Get gating weights if available
+                if hasattr(moe, 'gating_network_') and hasattr(moe.gating_network_, 'predict_proba'):
+                    try:
+                        gating_weights = moe.gating_network_.predict_proba(X_val)
+                        expert_telemetry['gating_weights'] = {
+                            'mean_weights': gating_weights.mean(axis=0).tolist(),
+                            'std_weights': gating_weights.std(axis=0).tolist(),
+                        }
+                    except Exception as e:
+                        print(f"  [Warning] Could not get gating weights: {e}")
+            except Exception as e:
+                print(f"  [Warning] Expert telemetry collection failed: {e}")
             
             # Overall metrics
             tp = ((y_pred == 1) & (y_val == 1)).sum()
             fp = ((y_pred == 1) & (y_val == 0)).sum()
             fn = ((y_pred == 0) & (y_val == 1)).sum()
+            tn = ((y_pred == 0) & (y_val == 0)).sum()
             
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+            accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0.0
             expectancy = (precision * TP_PCT) - ((1 - precision) * SL_PCT)
             
             print(f"\n[Fold {fold_idx}] Cluster {cluster_id} Performance:")
-            print(f"  Precision: {precision:.2%}, Recall: {recall:.2%}, Expectancy: {expectancy:.4f}")
+            print(f"  Precision: {precision:.2%}, Recall: {recall:.2%}, F1: {f1:.2%}")
+            print(f"  Accuracy: {accuracy:.2%}, Expectancy: {expectancy:.4f}")
             
             # Per-asset metrics
+            asset_detailed_metrics = {}
             if len(members) > 1:
                 print(f"\n[Fold {fold_idx}] Per-Asset Performance:")
                 
@@ -530,23 +579,46 @@ def run_hierarchical_fleet_training(
                     
                     y_val_asset = y_val[asset_mask]
                     y_pred_asset = y_pred[asset_mask]
+                    y_proba_asset = y_pred_proba[asset_mask]
                     
                     tp_asset = ((y_pred_asset == 1) & (y_val_asset == 1)).sum()
                     fp_asset = ((y_pred_asset == 1) & (y_val_asset == 0)).sum()
                     fn_asset = ((y_pred_asset == 0) & (y_val_asset == 1)).sum()
+                    tn_asset = ((y_pred_asset == 0) & (y_val_asset == 0)).sum()
                     
                     prec_asset = tp_asset / (tp_asset + fp_asset) if (tp_asset + fp_asset) > 0 else 0.0
                     rec_asset = tp_asset / (tp_asset + fn_asset) if (tp_asset + fn_asset) > 0 else 0.0
+                    f1_asset = 2 * (prec_asset * rec_asset) / (prec_asset + rec_asset) if (prec_asset + rec_asset) > 0 else 0.0
+                    acc_asset = (tp_asset + tn_asset) / (tp_asset + tn_asset + fp_asset + fn_asset) if (tp_asset + tn_asset + fp_asset + fn_asset) > 0 else 0.0
                     exp_asset = (prec_asset * TP_PCT) - ((1 - prec_asset) * SL_PCT)
                     
-                    print(f"  {asset:12s}: Prec={prec_asset:.2%}, Rec={rec_asset:.2%}, Exp={exp_asset:.5f}")
+                    print(f"  {asset:12s}: Prec={prec_asset:.2%}, Rec={rec_asset:.2%}, F1={f1_asset:.2%}, Exp={exp_asset:.5f}")
+                    
+                    # Store detailed metrics
+                    asset_detailed_metrics[asset] = {
+                        'tp': int(tp_asset),
+                        'fp': int(fp_asset),
+                        'fn': int(fn_asset),
+                        'tn': int(tn_asset),
+                        'precision': float(prec_asset),
+                        'recall': float(rec_asset),
+                        'f1': float(f1_asset),
+                        'accuracy': float(acc_asset),
+                        'expectancy': float(exp_asset),
+                        'mean_proba': float(y_proba_asset.mean()),
+                        'std_proba': float(y_proba_asset.std()),
+                        'n_samples': int(len(y_val_asset)),
+                    }
                     
                     per_asset_results[asset].append({
                         'cluster_id': cluster_id,
                         'fold': fold_idx,
                         'precision': prec_asset,
                         'recall': rec_asset,
+                        'f1': f1_asset,
+                        'accuracy': acc_asset,
                         'expectancy': exp_asset,
+                        'n_samples': int(len(y_val_asset)),
                     })
             
             fold_results.append({
@@ -554,7 +626,16 @@ def run_hierarchical_fleet_training(
                 'fold': fold_idx,
                 'precision': precision,
                 'recall': recall,
+                'f1': f1,
+                'accuracy': accuracy,
                 'expectancy': expectancy,
+                'tp': int(tp),
+                'fp': int(fp),
+                'fn': int(fn),
+                'tn': int(tn),
+                'n_samples': int(len(y_val)),
+                'expert_telemetry': expert_telemetry,
+                'asset_metrics': asset_detailed_metrics,
             })
             
             del X_train, X_val, y_train, y_val, moe
@@ -575,7 +656,10 @@ def run_hierarchical_fleet_training(
             'is_dominant': is_dominant,
             'avg_precision': cluster_df_results['precision'].mean(),
             'avg_recall': cluster_df_results['recall'].mean(),
+            'avg_f1': cluster_df_results['f1'].mean(),
+            'avg_accuracy': cluster_df_results['accuracy'].mean(),
             'avg_expectancy': cluster_df_results['expectancy'].mean(),
+            'fold_details': fold_results,  # All fold-level metrics
         }
         
         all_results.extend(fold_results)
@@ -625,10 +709,55 @@ def run_hierarchical_fleet_training(
         artifacts_dir = Path("artifacts")
         artifacts_dir.mkdir(exist_ok=True)
         
+        # Save CSV summary
         summary_df.to_csv(artifacts_dir / "hierarchical_fleet_results.csv", index=False)
+        
+        # Save comprehensive JSON telemetry
+        telemetry_data = {
+            'config': {
+                'n_clusters': n_clusters,
+                'n_folds': n_folds,
+                'history_days': history_days,
+                'history_days_5min': history_days_5min,
+                'interval': interval,
+                'max_frac_diff_d': max_frac_diff_d,
+                'market_factor_method': market_factor_method,
+                'assets': assets,
+            },
+            'cluster_assignments': {
+                asset: int(cluster_id) 
+                for asset, cluster_id in cluster_result.cluster_map.items()
+            },
+            'dominant_cluster_id': int(cluster_result.dominant_cluster_id),
+            'cluster_results': {
+                str(cid): {
+                    'members': list(stats['members']),
+                    'is_dominant': bool(stats['is_dominant']),
+                    'avg_precision': float(stats['avg_precision']),
+                    'avg_recall': float(stats['avg_recall']),
+                    'avg_f1': float(stats['avg_f1']),
+                    'avg_accuracy': float(stats['avg_accuracy']),
+                    'avg_expectancy': float(stats['avg_expectancy']),
+                    # Note: fold_details contains expert_telemetry with numpy arrays
+                    # We'll save a simplified version
+                    'n_folds': len(stats['fold_details']),
+                }
+                for cid, stats in cluster_results.items()
+            },
+            'per_asset_summary': summary_df.to_dict(orient='records'),
+            'per_asset_detailed': {
+                asset: results
+                for asset, results in per_asset_results.items()
+                if len(results) > 0
+            },
+        }
+        
+        with open(artifacts_dir / "hierarchical_fleet_telemetry.json", "w") as f:
+            json.dump(telemetry_data, f, indent=2)
         
         print(f"\n[Artifacts] Results saved to:")
         print(f"  - {artifacts_dir / 'hierarchical_fleet_results.csv'}")
+        print(f"  - {artifacts_dir / 'hierarchical_fleet_telemetry.json'}")
     
     # Success criteria
     print("\n" + "=" * 72)
@@ -667,7 +796,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--clusters", type=int, default=3, help="Number of clusters")
     parser.add_argument("--folds", type=int, default=5, help="Number of CV folds")
-    parser.add_argument("--days", type=int, default=730, help="Days of history per asset")
+    parser.add_argument("--days", type=int, default=730, help="Days of hourly history per asset")
+    parser.add_argument("--minutes", type=int, default=0, help="Days of 5-minute history (0=disabled, recommended: 120-180)")
     parser.add_argument("--max-d", type=float, default=0.65, help="Max frac diff order")
     parser.add_argument("--factor-method", type=str, default="pca", 
                        choices=['pca', 'mean', 'weighted_mean'],
@@ -680,6 +810,7 @@ if __name__ == "__main__":
         n_clusters=args.clusters,
         n_folds=args.folds,
         history_days=args.days,
+        history_days_5min=args.minutes,
         max_frac_diff_d=args.max_d,
         market_factor_method=args.factor_method,
     )
