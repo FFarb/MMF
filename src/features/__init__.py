@@ -37,11 +37,30 @@ class SignalFactory:
         self.windows = [3, 5, 8, 13, 14, 21, 34, 55, 89, 144, 200]
         self.lags = [1, 2, 3, 5, 8, 13]
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: pd.DataFrame, macro_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """
         Expand an OHLCV DataFrame into a dense feature matrix.
+        
+        MULTI-TIMEFRAME UPGRADE:
+        If macro_df is provided (e.g., H1 data when df is M5), key macro indicators
+        are calculated and broadcast to the micro timeframe to fix "context myopia".
+        
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Primary OHLCV data (e.g., M5 bars)
+        macro_df : pd.DataFrame, optional
+            Higher timeframe OHLCV data (e.g., H1 bars) for macro context
+        
+        Returns
+        -------
+        pd.DataFrame
+            Feature matrix with both micro and macro (if provided) features
         """
         print(f"[FEATURES] Starting Signal Factory on {len(df)} rows...")
+        
+        if macro_df is not None:
+            print(f"[FEATURES] MTF Mode: Injecting macro features from {len(macro_df)} H1 bars")
 
         ohlcv_cols = ["open", "high", "low", "close", "volume"]
         for col in ohlcv_cols:
@@ -133,6 +152,11 @@ class SignalFactory:
                 col = f"{feature}_{window}"
                 if col in df.columns:
                     df[col] = df[col].astype(np.float32)
+        
+        # MULTI-TIMEFRAME FEATURE INJECTION
+        if macro_df is not None:
+            print("  [STEP MTF] Multi-Timeframe Feature Injection")
+            df = self._inject_macro_features(df, macro_df)
 
         print("  [STEP D] Lagged features")
         exclude_cols = ["open", "high", "low", "close", "volume", "timestamp"]
@@ -156,6 +180,94 @@ class SignalFactory:
             df[float_cols] = df[float_cols].astype(np.float32)
 
         print(f"[FEATURES] Complete. Shape: {df.shape}")
+        return df
+    
+    def _inject_macro_features(self, df: pd.DataFrame, macro_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Inject macro (higher timeframe) features into micro (lower timeframe) data.
+        
+        This fixes "context myopia" where 5-minute data loses the macro trend view.
+        Key macro indicators are calculated on H1 data and broadcast to M5 timestamps.
+        
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Micro timeframe data (e.g., M5) with datetime index
+        macro_df : pd.DataFrame
+            Macro timeframe data (e.g., H1) with datetime index
+        
+        Returns
+        -------
+        pd.DataFrame
+            df with macro features added (macro_rsi, macro_trend, etc.)
+        """
+        macro_df = macro_df.copy()
+        
+        # Ensure both have datetime index
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'timestamp' in df.columns:
+                df = df.set_index('timestamp')
+        
+        if not isinstance(macro_df.index, pd.DatetimeIndex):
+            if 'timestamp' in macro_df.columns:
+                macro_df = macro_df.set_index('timestamp')
+        
+        print(f"    Macro timeframe: {len(macro_df)} bars")
+        print(f"    Micro timeframe: {len(df)} bars")
+        
+        # Calculate key macro indicators
+        macro_features = pd.DataFrame(index=macro_df.index)
+        
+        # 1. Macro RSI (14-period on H1)
+        macro_features['macro_rsi'] = ta.rsi(macro_df['close'], length=14).astype(np.float32)
+        
+        # 2. Macro Trend (SMA Cross: 50 vs 200)
+        sma_50 = ta.sma(macro_df['close'], length=50)
+        sma_200 = ta.sma(macro_df['close'], length=200)
+        macro_features['macro_trend'] = ((sma_50 > sma_200).astype(int) * 2 - 1).astype(np.float32)  # +1 or -1
+        
+        # 3. Macro Volatility (20-period std on H1)
+        macro_log_ret = np.log(macro_df['close'] / macro_df['close'].shift(1))
+        macro_features['macro_volatility'] = macro_log_ret.rolling(window=20).std().astype(np.float32)
+        
+        # 4. Macro Momentum (ROC 21 on H1)
+        macro_features['macro_momentum'] = ta.roc(macro_df['close'], length=21).astype(np.float32)
+        
+        # 5. Macro ADX (trend strength on H1)
+        adx_macro = ta.adx(macro_df['high'], macro_df['low'], macro_df['close'], length=14)
+        if adx_macro is not None:
+            macro_features['macro_adx'] = adx_macro['ADX_14'].astype(np.float32)
+        
+        # 6. Macro MACD
+        macd_macro = ta.macd(macro_df['close'])
+        if macd_macro is not None:
+            macro_features['macro_macd'] = macd_macro['MACD_12_26_9'].astype(np.float32)
+            macro_features['macro_macd_hist'] = macd_macro['MACDh_12_26_9'].astype(np.float32)
+        
+        # 7. Macro Distance from SMA (price position)
+        macro_features['macro_dist_sma50'] = ((macro_df['close'] - sma_50) / sma_50).astype(np.float32)
+        
+        print(f"    Calculated {len(macro_features.columns)} macro features")
+        
+        # Broadcast macro features to micro timeframe (forward fill)
+        # This aligns H1 features to M5 timestamps
+        macro_resampled = macro_features.reindex(
+            df.index,
+            method='ffill',  # Forward fill: each M5 bar gets the most recent H1 value
+            limit=12  # Limit forward fill to 12 periods (1 hour for M5 data)
+        )
+        
+        # Fill any remaining NaNs with 0 (neutral)
+        macro_resampled = macro_resampled.fillna(0)
+        
+        # Add to micro dataframe
+        for col in macro_resampled.columns:
+            df[col] = macro_resampled[col]
+        
+        n_valid = (~macro_resampled.isna()).sum().sum()
+        print(f"    ✓ Injected {len(macro_features.columns)} macro features")
+        print(f"    ✓ {n_valid} valid macro values broadcast to micro timeframe")
+        
         return df
 
 

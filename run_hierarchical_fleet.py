@@ -234,7 +234,20 @@ def run_hierarchical_fleet_training(
                 print(f"  ⚠️  Insufficient data for {asset_symbol}, skipping...")
                 continue
             
-            print(f"  [Data] Loaded {len(df_raw)} candles")
+            print(f"  [Data] Loaded {len(df_raw)} candles ({interval}min)")
+            
+            # MTF: Load H1 data if we're using M5
+            df_macro = None
+            if interval == "5":
+                print(f"  [MTF] Loading H1 data for macro context...")
+                loader_h1 = MarketDataLoader(symbol=asset_symbol, interval="60")
+                df_macro = loader_h1.get_data(days_back=history)
+                
+                if df_macro is not None and len(df_macro) > 200:
+                    print(f"  [MTF] Loaded {len(df_macro)} H1 candles for macro features")
+                else:
+                    print(f"  [MTF] Warning: Insufficient H1 data, proceeding without macro features")
+                    df_macro = None
             
             # Fractional Differentiation (capped at max_frac_diff_d)
             frac_diff = FractionalDifferentiator(window_size=2048)
@@ -253,8 +266,8 @@ def run_hierarchical_fleet_training(
             
             print(f"  [FracDiff] Optimal d: {optimal_d:.3f}")
             
-            # Generate Features
-            df_features = factory.generate_signals(df_raw)
+            # Generate Features (with MTF injection if available)
+            df_features = factory.generate_signals(df_raw, macro_df=df_macro)
             df_features['frac_diff'] = df_raw['frac_diff'].reindex(df_features.index)
             df_features['close'] = df_raw['close'].reindex(df_features.index)
             df_features['volume'] = df_raw['volume'].reindex(df_features.index)
