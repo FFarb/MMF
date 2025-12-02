@@ -232,33 +232,33 @@ def compare_results(results_naive: Dict, results_sniper: Dict):
         print(f"    Sniper: {sniper_return_dd_ratio:.2f}")
         print(f"    Improvement: {ratio_improvement:+.2f}")
     elif stats_naive['n_trades'] == 0 or stats_sniper['n_trades'] == 0:
-        print(f"\n  ⚠️  Warning: One or both strategies executed no trades")
+        print(f"\n  WARNING: One or both strategies executed no trades")
         print(f"    Naive trades: {stats_naive['n_trades']}")
         print(f"    Sniper trades: {stats_sniper['n_trades']}")
     
     # Verdict
-    print("\n" + "─" * 72)
+    print("\n" + "-" * 72)
     print("VERDICT")
-    print("─" * 72)
+    print("-" * 72)
     
     if stats_naive['n_trades'] == 0 and stats_sniper['n_trades'] == 0:
-        print("  ❌ NO TRADES: Both strategies executed no trades")
+        print("  X NO TRADES: Both strategies executed no trades")
         print("  Issue: Check data alignment and signal generation")
     elif stats_sniper['n_trades'] == 0:
-        print("  ❌ SNIPER FAILED: No trades executed")
+        print("  X SNIPER FAILED: No trades executed")
         print("  Issue: OU thresholds too strict or M5 data missing")
         print("  Recommendation: Relax OU thresholds or check data")
     elif stats_naive['n_trades'] == 0:
-        print("  ❌ NAIVE FAILED: No trades executed")
+        print("  X NAIVE FAILED: No trades executed")
         print("  Issue: Check H1 signals and M5 data alignment")
     elif return_improvement > 0 and sharpe_improvement > 0:
-        print("  ✅ SNIPER WINS: Better return AND better risk-adjusted performance")
+        print("  + SNIPER WINS: Better return AND better risk-adjusted performance")
         print("  Recommendation: Deploy Sniper strategy to demo account")
     elif return_improvement > 0:
-        print("  ⚠️  SNIPER MIXED: Better return but worse risk metrics")
+        print("  ~ SNIPER MIXED: Better return but worse risk metrics")
         print("  Recommendation: Review risk management parameters")
     else:
-        print("  ❌ NAIVE WINS: Sniper did not improve performance")
+        print("  - NAIVE WINS: Sniper did not improve performance")
         print("  Recommendation: Revisit entry logic or H1 signals")
 
 
