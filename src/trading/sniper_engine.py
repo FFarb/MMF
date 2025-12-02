@@ -267,10 +267,14 @@ class SniperBacktestEngine:
             h1_end = h1_time + pd.Timedelta(hours=1)
             
             # Get M5 bars within this H1 period
-            m5_bars = m5_data.loc[h1_start:h1_end]
+            # Use boolean indexing for flexible time range matching
+            m5_mask = (m5_data.index >= h1_start) & (m5_data.index < h1_end)
+            m5_bars = m5_data.loc[m5_mask]
             
             if len(m5_bars) == 0:
                 n_skipped += 1
+                if n_skipped == 1:  # Print debug info for first skip
+                    print(f"  [DEBUG] First skip: H1 time={h1_time}, M5 range={m5_data.index.min()} to {m5_data.index.max()}")
                 continue
             
             # Entry logic

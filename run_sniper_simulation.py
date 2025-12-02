@@ -222,7 +222,7 @@ def compare_results(results_naive: Dict, results_sniper: Dict):
     print(f"  Trade Count Change:    {stats_sniper['n_trades'] - stats_naive['n_trades']:+d}")
     
     # Calculate risk-adjusted improvement
-    if stats_naive['max_drawdown_pct'] != 0:
+    if stats_naive['max_drawdown_pct'] != 0 and stats_sniper['max_drawdown_pct'] != 0:
         naive_return_dd_ratio = stats_naive['total_return_pct'] / abs(stats_naive['max_drawdown_pct'])
         sniper_return_dd_ratio = stats_sniper['total_return_pct'] / abs(stats_sniper['max_drawdown_pct'])
         ratio_improvement = sniper_return_dd_ratio - naive_return_dd_ratio
@@ -231,13 +231,27 @@ def compare_results(results_naive: Dict, results_sniper: Dict):
         print(f"    Naive:  {naive_return_dd_ratio:.2f}")
         print(f"    Sniper: {sniper_return_dd_ratio:.2f}")
         print(f"    Improvement: {ratio_improvement:+.2f}")
+    elif stats_naive['n_trades'] == 0 or stats_sniper['n_trades'] == 0:
+        print(f"\n  ⚠️  Warning: One or both strategies executed no trades")
+        print(f"    Naive trades: {stats_naive['n_trades']}")
+        print(f"    Sniper trades: {stats_sniper['n_trades']}")
     
     # Verdict
     print("\n" + "─" * 72)
     print("VERDICT")
     print("─" * 72)
     
-    if return_improvement > 0 and sharpe_improvement > 0:
+    if stats_naive['n_trades'] == 0 and stats_sniper['n_trades'] == 0:
+        print("  ❌ NO TRADES: Both strategies executed no trades")
+        print("  Issue: Check data alignment and signal generation")
+    elif stats_sniper['n_trades'] == 0:
+        print("  ❌ SNIPER FAILED: No trades executed")
+        print("  Issue: OU thresholds too strict or M5 data missing")
+        print("  Recommendation: Relax OU thresholds or check data")
+    elif stats_naive['n_trades'] == 0:
+        print("  ❌ NAIVE FAILED: No trades executed")
+        print("  Issue: Check H1 signals and M5 data alignment")
+    elif return_improvement > 0 and sharpe_improvement > 0:
         print("  ✅ SNIPER WINS: Better return AND better risk-adjusted performance")
         print("  Recommendation: Deploy Sniper strategy to demo account")
     elif return_improvement > 0:
