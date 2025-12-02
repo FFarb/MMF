@@ -159,6 +159,7 @@ def run_enriched_fleet_training(
     n_folds: int = 5,
     history_days_h1: int = 730,  # H1 history (2 years)
     history_days_m5: int = 150,  # M5 history (5 months)
+    holdout_days: int = 0,  # Days to exclude from training (for validation)
     max_frac_diff_d: float = 0.65,
     market_factor_method: str = 'pca',
 ):
@@ -177,6 +178,9 @@ def run_enriched_fleet_training(
         Days of H1 history (default: 730 = 2 years)
     history_days_m5 : int
         Days of M5 history for microstructure (default: 150 = 5 months)
+    holdout_days : int
+        Days to exclude from training for walk-forward validation (default: 0)
+        Example: 180 = train on older data, validate sniper on last 180 days
     max_frac_diff_d : float
         Maximum fractional differentiation order
     market_factor_method : str
@@ -186,6 +190,9 @@ def run_enriched_fleet_training(
     print("ENRICHED FLEET TRAINING: H1 Main + M5 Hints")
     print(f"Training {len(assets)} assets with microstructure enrichment")
     print(f"H1 History: {history_days_h1} days, M5 History: {history_days_m5} days")
+    if holdout_days > 0:
+        print(f"Holdout Period: {holdout_days} days (excluded from training)")
+        print(f"Purpose: Walk-forward validation for sniper simulation")
     print("=" * 72)
     
     # Step 1: Load and Preprocess Data
@@ -256,10 +263,30 @@ def run_enriched_fleet_training(
                 
                 print(f"  [Microstructure] ✓ Added {len(micro_features.columns)} microstructure features")
             
-            # Store in asset_data
-            asset_data[asset_symbol] = df_h1_features
+            # Apply holdout period if specified
+            if holdout_days > 0:
+                # Calculate cutoff date
+                cutoff_date = df_h1_features.index.max() - pd.Timedelta(days=holdout_days)
+                
+                # Split into training and holdout
+                df_train = df_h1_features[df_h1_features.index <= cutoff_date].copy()
+                df_holdout = df_h1_features[df_h1_features.index > cutoff_date].copy()
+                
+                print(f"  [Holdout] Training: {len(df_train)} samples (up to {cutoff_date.date()})")
+                print(f"  [Holdout] Held out: {len(df_holdout)} samples (after {cutoff_date.date()})")
+                
+                # Store both for later use
+                asset_data[asset_symbol] = df_train
+                
+                # Save holdout data for sniper validation
+                holdout_file = Path(f"artifacts/holdout_data_{asset_symbol}.csv")
+                df_holdout.to_csv(holdout_file)
+                print(f"  [Holdout] Saved to: {holdout_file}")
+            else:
+                # No holdout - use all data
+                asset_data[asset_symbol] = df_h1_features
             
-            print(f"  ✓ {len(df_h1_features)} samples, {df_h1_features.shape[1]} features")
+            print(f"  ✓ {len(asset_data[asset_symbol])} training samples, {df_h1_features.shape[1]} features")
             
         except Exception as e:
             import traceback
@@ -729,6 +756,7 @@ if __name__ == "__main__":
     parser.add_argument("--folds", type=int, default=5, help="Number of CV folds")
     parser.add_argument("--h1-days", type=int, default=730, help="Days of H1 history")
     parser.add_argument("--m5-days", type=int, default=150, help="Days of M5 history for microstructure")
+    parser.add_argument("--holdout-days", type=int, default=0, help="Days to exclude from training (for walk-forward validation)")
     parser.add_argument("--max-d", type=float, default=0.65, help="Max frac diff order")
     parser.add_argument("--factor-method", type=str, default="pca",
                        choices=['pca', 'mean', 'weighted_mean'],
@@ -742,6 +770,7 @@ if __name__ == "__main__":
         n_folds=args.folds,
         history_days_h1=args.h1_days,
         history_days_m5=args.m5_days,
+        holdout_days=args.holdout_days,
         max_frac_diff_d=args.max_d,
         market_factor_method=args.factor_method,
     )
