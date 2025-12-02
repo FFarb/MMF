@@ -65,44 +65,137 @@ def _ensure_columns(df: pd.DataFrame, columns: Sequence[str]) -> List[str]:
     return list(columns)
 
 
-def _derive_regime_targets(physics_matrix: np.ndarray) -> np.ndarray:
+def _get_oracle_targets(
+    experts: dict,
+    X: pd.DataFrame,
+    y_true: np.ndarray,
+    use_ou: bool = True,
+    use_cnn: bool = True,
+    high_loss_threshold: float = 0.8,
+) -> np.ndarray:
     """
-    Derive regime labels for gating network training.
+    Generate oracle labels for gating network training.
     
-    Uses physics features to identify market regimes:
-    - 0: Trend (default)
-    - 1: Range (low Hurst)
-    - 2: Stress (high entropy/FDI)
-    - 3: Pattern (CNN-preferring ambiguous churn)
+    ORACLE TRAINING:
+    - Instead of heuristic physics rules, train gating network to predict
+      which expert is actually correct for each sample
+    - Solves uniform weight problem by learning from expert performance
+    
+    Logic:
+    ------
+    1. Get predictions from all experts on training data
+    2. Calculate cross-entropy loss for each expert per sample
+    3. Target = index of expert with lowest loss
+    4. If all experts have high loss → Stress Expert (safety)
+    
+    Parameters
+    ----------
+    experts : dict
+        Dictionary of trained experts
+        Keys: 'trend', 'range', 'stress', 'ou', 'cnn'
+    X : DataFrame
+        Feature matrix
+    y_true : ndarray
+        True labels
+    use_ou : bool
+        Whether OU expert is enabled
+    use_cnn : bool
+        Whether CNN expert is enabled
+    high_loss_threshold : float
+        Threshold for "all experts failing" (default to Stress)
+    
+    Returns
+    -------
+    oracle_labels : ndarray
+        Expert index for each sample (0=Trend, 1=Range, 2=Stress, 3=Pattern, 4=Elastic)
     """
-    hurst = physics_matrix[:, 0]
-    entropy = physics_matrix[:, 1]
-    fractal_dim = physics_matrix[:, 2]
+    n_samples = len(y_true)
     
-    # Handle NaNs
-    fractal_dim = np.nan_to_num(fractal_dim, nan=np.nanmean(fractal_dim))
-    entropy = np.nan_to_num(entropy, nan=np.nanmean(entropy))
+    # Prepare data for different expert types
+    # Trend, OU, CNN use DataFrame (they handle column filtering internally)
+    # Range, Stress use scaled numeric array
     
-    # Initialize as Trend (0)
-    labels = np.zeros(hurst.shape[0], dtype=int)
+    df = _as_dataframe(X)
+    numeric_df = df.select_dtypes(include=["number"])
     
-    # Identify regimes
-    high_fdi = np.nanpercentile(fractal_dim, 75)
-    stress_mask = (entropy > 0.9) | (fractal_dim > high_fdi)
-    range_mask = (~stress_mask) & (hurst <= 0.55)
-    pattern_mask = (~stress_mask) & (~range_mask) & ((entropy >= 0.6) & (entropy <= 0.85))
+    # Get predictions from all experts
+    expert_probas = []
+    expert_names = []
     
-    labels[range_mask] = 1   # Range
-    labels[stress_mask] = 2  # Stress
-    labels[pattern_mask] = 3 # Pattern (CNN)
+    # Expert 1: Trend (uses DataFrame, handles filtering internally)
+    expert_probas.append(experts['trend'].predict_proba(X)[:, 1])
+    expert_names.append('Trend')
     
-    return labels
+    # Expert 2: Range (uses scaled numeric array)
+    expert_probas.append(experts['range'].predict_proba(numeric_df.to_numpy(dtype=float))[:, 1])
+    expert_names.append('Range')
+    
+    # Expert 3: Stress (uses scaled numeric array)
+    expert_probas.append(experts['stress'].predict_proba(numeric_df.to_numpy(dtype=float))[:, 1])
+    expert_names.append('Stress')
+    
+    # Expert 4: OU/Elastic (uses DataFrame)
+    if use_ou and experts.get('ou') is not None:
+        expert_probas.append(experts['ou'].predict_proba(X)[:, 1])
+        expert_names.append('Elastic')
+    
+    # Expert 5: CNN/Pattern (uses DataFrame)
+    if use_cnn and experts.get('cnn') is not None:
+        expert_probas.append(experts['cnn'].predict_proba(X)[:, 1])
+        expert_names.append('Pattern')
+    
+    # Stack probabilities (n_samples, n_experts)
+    probas_matrix = np.column_stack(expert_probas)
+    
+    # Calculate cross-entropy loss for each expert
+    # CE = -[y*log(p) + (1-y)*log(1-p)]
+    y_true_expanded = y_true[:, np.newaxis]  # (n_samples, 1)
+    
+    # Clip probabilities to avoid log(0)
+    probas_clipped = np.clip(probas_matrix, 1e-7, 1 - 1e-7)
+    
+    # Cross-entropy loss per expert
+    ce_loss = -(
+        y_true_expanded * np.log(probas_clipped) +
+        (1 - y_true_expanded) * np.log(1 - probas_clipped)
+    )
+    
+    # Find expert with lowest loss for each sample
+    oracle_labels = np.argmin(ce_loss, axis=1)
+    
+    # Safety: If all experts have high loss, default to Stress Expert
+    min_loss = np.min(ce_loss, axis=1)
+    high_loss_mask = min_loss > high_loss_threshold
+    
+    if high_loss_mask.any():
+        # Find Stress expert index
+        stress_idx = expert_names.index('Stress') if 'Stress' in expert_names else 2
+        oracle_labels[high_loss_mask] = stress_idx
+        n_stress_fallback = high_loss_mask.sum()
+        print(f"  [Oracle] {n_stress_fallback} samples ({n_stress_fallback/n_samples*100:.1f}%) "
+              f"defaulted to Stress (all experts failing)")
+    
+    # Log oracle distribution
+    unique, counts = np.unique(oracle_labels, return_counts=True)
+    print("  [Oracle] Expert Selection Distribution:")
+    for label, count in zip(unique, counts):
+        expert_name = expert_names[label] if label < len(expert_names) else f"Expert {label}"
+        pct = count / n_samples * 100
+        avg_loss = np.mean(ce_loss[:, label])
+        print(f"    {expert_name}: {count} ({pct:.1f}%) - Avg Loss: {avg_loss:.3f}")
+    
+    return oracle_labels
 
 
 @dataclass
 class TrendExpert(BaseEstimator, ClassifierMixin):
     """
     Pure HistGradientBoosting expert for sustainable trends.
+    
+    ASSET-AWARE UPGRADE:
+    - Treats asset_id as categorical feature
+    - Allows learning asset-specific rules (SOL != ETH)
+    - Shares neural backbone while respecting asset physics
     
     SUBTRACTION: Removed GraphVisionary complexity.
     WHY: HistGBM is faster, handles NaNs natively, outperforms standard GBM.
@@ -116,44 +209,95 @@ class TrendExpert(BaseEstimator, ClassifierMixin):
     
     def __post_init__(self) -> None:
         """Initialize the HistGradientBoosting classifier."""
-        self.model = HistGradientBoostingClassifier(
-            learning_rate=self.learning_rate,
-            max_iter=self.max_iter,
-            max_depth=self.max_depth,
-            validation_fraction=self.validation_fraction,
-            early_stopping=self.early_stopping,
-            random_state=self.random_state,
-        )
+        # Note: categorical_features will be set dynamically in fit()
+        self.model = None
         self.scaler_ = StandardScaler()
         self._fitted = False
         self.classes_ = np.array([0, 1])
+        self.asset_id_col_idx_ = None  # Track asset_id column index
+        self.feature_names_ = None
     
     def fit(self, X, y, sample_weight=None) -> "TrendExpert":
         """
         Fit the trend expert.
         
+        ASSET-AWARE: Keeps asset_id as categorical feature for asset-specific rules.
+        
         Parameters
         ----------
         X : DataFrame or array
-            Feature matrix
+            Feature matrix (should include asset_id if available)
         y : array
             Target labels
         sample_weight : array, optional
             Sample weights (physics gating)
         """
         df = _as_dataframe(X)
-        numeric_df = df.select_dtypes(include=["number"])
-        if 'asset_id' in df.columns:
-            numeric_df = numeric_df.drop(columns=['asset_id'], errors='ignore')
         
-        X_array = numeric_df.to_numpy(dtype=float)
+        # Check if asset_id exists
+        has_asset_id = 'asset_id' in df.columns
+        
+        if has_asset_id:
+            # Encode asset_id as integer (categorical)
+            asset_id_series = df['asset_id']
+            unique_assets = sorted(asset_id_series.unique())
+            asset_to_idx = {asset: idx for idx, asset in enumerate(unique_assets)}
+            asset_id_encoded = asset_id_series.map(asset_to_idx).values
+            
+            # Get numeric features (excluding asset_id)
+            numeric_df = df.select_dtypes(include=["number"])
+            numeric_df = numeric_df.drop(columns=['asset_id'], errors='ignore')
+            
+            # Scale numeric features
+            X_numeric = numeric_df.to_numpy(dtype=float)
+            X_scaled = self.scaler_.fit_transform(X_numeric)
+            
+            # Concatenate scaled numeric + encoded asset_id
+            X_array = np.column_stack([X_scaled, asset_id_encoded])
+            
+            # Track asset_id column index (last column)
+            self.asset_id_col_idx_ = X_array.shape[1] - 1
+            self.feature_names_ = list(numeric_df.columns) + ['asset_id']
+            
+            # Initialize model with categorical features
+            self.model = HistGradientBoostingClassifier(
+                learning_rate=self.learning_rate,
+                max_iter=self.max_iter,
+                max_depth=self.max_depth,
+                validation_fraction=self.validation_fraction,
+                early_stopping=self.early_stopping,
+                random_state=self.random_state,
+                categorical_features=[self.asset_id_col_idx_],  # Asset-aware!
+            )
+            
+            print(f"  [TrendExpert] Asset-aware mode: {len(unique_assets)} assets, "
+                  f"asset_id at index {self.asset_id_col_idx_}")
+        else:
+            # No asset_id, standard mode
+            numeric_df = df.select_dtypes(include=["number"])
+            X_array = numeric_df.to_numpy(dtype=float)
+            X_scaled = self.scaler_.fit_transform(X_array)
+            X_array = X_scaled
+            
+            self.asset_id_col_idx_ = None
+            self.feature_names_ = list(numeric_df.columns)
+            
+            # Initialize model without categorical features
+            self.model = HistGradientBoostingClassifier(
+                learning_rate=self.learning_rate,
+                max_iter=self.max_iter,
+                max_depth=self.max_depth,
+                validation_fraction=self.validation_fraction,
+                early_stopping=self.early_stopping,
+                random_state=self.random_state,
+            )
+            
+            print(f"  [TrendExpert] Standard mode (no asset_id)")
+        
         y_array = np.ravel(np.asarray(y))
         
-        # Scale features
-        X_scaled = self.scaler_.fit_transform(X_array)
-        
         # Train with sample weights
-        self.model.fit(X_scaled, y_array, sample_weight=sample_weight)
+        self.model.fit(X_array, y_array, sample_weight=sample_weight)
         
         self._fitted = True
         return self
@@ -164,12 +308,29 @@ class TrendExpert(BaseEstimator, ClassifierMixin):
             raise RuntimeError("TrendExpert not fitted")
         
         df = _as_dataframe(X)
-        numeric_df = df.select_dtypes(include=["number"])
-        if 'asset_id' in df.columns:
-            numeric_df = numeric_df.drop(columns=['asset_id'], errors='ignore')
         
-        X_scaled = self.scaler_.transform(numeric_df.to_numpy(dtype=float))
-        return self.model.predict_proba(X_scaled)
+        if self.asset_id_col_idx_ is not None:
+            # Asset-aware mode
+            asset_id_series = df['asset_id']
+            
+            # Encode asset_id (handle unseen assets by mapping to 0)
+            unique_assets_train = [name for name in self.feature_names_ if name != 'asset_id']
+            asset_id_encoded = pd.Categorical(asset_id_series).codes
+            
+            # Get numeric features
+            numeric_df = df.select_dtypes(include=["number"])
+            numeric_df = numeric_df.drop(columns=['asset_id'], errors='ignore')
+            
+            # Scale and concatenate
+            X_scaled = self.scaler_.transform(numeric_df.to_numpy(dtype=float))
+            X_array = np.column_stack([X_scaled, asset_id_encoded])
+        else:
+            # Standard mode
+            numeric_df = df.select_dtypes(include=["number"])
+            X_scaled = self.scaler_.transform(numeric_df.to_numpy(dtype=float))
+            X_array = X_scaled
+        
+        return self.model.predict_proba(X_array)
     
     def predict(self, X) -> np.ndarray:
         """Predict class labels."""
@@ -210,6 +371,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
     
     # Gating Network params
     gating_epochs: int = 500
+    use_asset_embedding: bool = False  # NEW: Enable asset-specific gating policies
     
     # OU Expert params
     use_ou: bool = True
@@ -364,12 +526,65 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         print("  [MoE] Training Expert 5: Pattern (CNN)...")
         self._train_cnn_expert(df, y_array)
         
-        # Train Gating Network
-        print("  [MoE] Training Gating Network...")
+        # Train Gating Network with Oracle Labels
+        print("  [MoE] Training Gating Network (Oracle Mode)...")
+        print("    Generating oracle labels from expert performance...")
+        
+        # Create expert dictionary for oracle training
+        experts_dict = {
+            'trend': self.trend_expert,
+            'range': self.range_expert,
+            'stress': self.stress_expert,
+            'ou': self.ou_expert if self._ou_enabled else None,
+            'cnn': self.cnn_expert if self._cnn_enabled else None,
+        }
+        
+        # Generate oracle labels (which expert is best for each sample)
+        oracle_labels = _get_oracle_targets(
+            experts=experts_dict,
+            X=base_df,
+            y_true=y_array,
+            use_ou=self._ou_enabled,
+            use_cnn=self._cnn_enabled,
+        )
+        
+        # Train gating network on physics features → oracle labels
         physics_matrix = base_df.loc[:, physics_cols].to_numpy(dtype=float)
         scaled_physics = self.physics_scaler.fit_transform(physics_matrix)
-        regime_labels = _derive_regime_targets(physics_matrix)
-        self.gating_network.fit(scaled_physics, regime_labels)
+        
+        # MULTI-ASSET: Add asset embeddings if enabled
+        if self.use_asset_embedding and 'asset_id' in df.columns:
+            print("  [MoE] Adding asset embeddings to gating network...")
+            
+            # One-hot encode asset_id
+            asset_ids = df['asset_id'].values
+            unique_assets = np.unique(asset_ids)
+            n_assets = len(unique_assets)
+            
+            # Create asset mapping
+            asset_to_idx = {asset: idx for idx, asset in enumerate(unique_assets)}
+            asset_indices = np.array([asset_to_idx[a] for a in asset_ids])
+            
+            # One-hot encoding
+            asset_onehot = np.zeros((len(asset_ids), n_assets))
+            asset_onehot[np.arange(len(asset_ids)), asset_indices] = 1
+            
+            # Concatenate physics features with asset embeddings
+            gating_input = np.concatenate([scaled_physics, asset_onehot], axis=1)
+            
+            print(f"    [Gating] Physics features: {scaled_physics.shape[1]}")
+            print(f"    [Gating] Asset embedding dim: {n_assets}")
+            print(f"    [Gating] Total input dim: {gating_input.shape[1]}")
+            
+            # Store asset mapping for prediction
+            self.asset_to_idx_ = asset_to_idx
+            self.n_assets_ = n_assets
+        else:
+            gating_input = scaled_physics
+            self.asset_to_idx_ = None
+            self.n_assets_ = 0
+        
+        self.gating_network.fit(gating_input, oracle_labels)
         
         self._gate_classes_ = list(self.gating_network.classes_)
         self._fitted = True
@@ -436,9 +651,16 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             logger.warning("CNNExpert training failed (%s). Falling back to 3-way MoE.", exc)
             self.cnn_expert = None
     
-    def _gating_weights(self, physics_matrix: np.ndarray) -> np.ndarray:
+    def _gating_weights(self, physics_matrix: np.ndarray, asset_ids: np.ndarray = None) -> np.ndarray:
         """
         Compute expert weights using physics-based gating.
+        
+        Parameters
+        ----------
+        physics_matrix : ndarray
+            Physics features
+        asset_ids : ndarray, optional
+            Asset identifiers for multi-asset training
         
         Returns
         -------
@@ -446,7 +668,20 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             Normalized weights for each expert
         """
         scaled = self.physics_scaler.transform(physics_matrix)
-        raw = self.gating_network.predict_proba(scaled)
+        
+        # MULTI-ASSET: Add asset embeddings if enabled
+        if self.use_asset_embedding and asset_ids is not None and self.asset_to_idx_ is not None:
+            # One-hot encode asset_ids
+            asset_indices = np.array([self.asset_to_idx_.get(a, 0) for a in asset_ids])
+            asset_onehot = np.zeros((len(asset_ids), self.n_assets_))
+            asset_onehot[np.arange(len(asset_ids)), asset_indices] = 1
+            
+            # Concatenate with physics features
+            gating_input = np.concatenate([scaled, asset_onehot], axis=1)
+        else:
+            gating_input = scaled
+        
+        raw = self.gating_network.predict_proba(gating_input)
         
         # Count active experts
         n_experts = 3  # Base: Trend, Range, Stress
@@ -454,7 +689,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             n_experts += 1
         if self._cnn_enabled:
             n_experts += 1
-        weights = np.full((scaled.shape[0], n_experts), 1.0 / float(n_experts), dtype=float)
+        weights = np.full((gating_input.shape[0], n_experts), 1.0 / float(n_experts), dtype=float)
         
         # Map gating network outputs to expert weights
         for idx, cls in enumerate(self._gate_classes_):
@@ -524,7 +759,11 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         
         # Get physics features for gating
         physics_matrix = base_df.loc[:, _ensure_columns(base_df, self.physics_features)].to_numpy(dtype=float)
-        weights = self._gating_weights(physics_matrix)
+        
+        # Extract asset_ids if present (for multi-asset training)
+        asset_ids = df['asset_id'].values if 'asset_id' in df.columns else None
+        
+        weights = self._gating_weights(physics_matrix, asset_ids=asset_ids)
         
         # Get expert predictions
         p_trend = self.trend_expert.predict_proba(base_df)
@@ -594,7 +833,10 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         physics_cols = _ensure_columns(df, self.physics_features)
         physics_matrix = df.loc[:, physics_cols].to_numpy(dtype=float)
         
-        weights = self._gating_weights(physics_matrix)
+        # Extract asset_ids if present
+        asset_ids = df['asset_id'].values if 'asset_id' in df.columns else None
+        
+        weights = self._gating_weights(physics_matrix, asset_ids=asset_ids)
         activation = weights.mean(axis=0)
         confidence = np.max(weights, axis=1).mean()
         

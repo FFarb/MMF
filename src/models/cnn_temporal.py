@@ -108,6 +108,11 @@ class ChannelAttention(nn.Module):
 class TemporalConvNet(nn.Module):
     """
     Temporal ConvNet backbone that consumes [batch, channels, length] tensors.
+    
+    ASSET-AWARE UPGRADE:
+    - Optional asset embedding layer
+    - Embeddings are expanded and concatenated with time-series input
+    - Conv1d layers process price action conditional on asset identity
     """
 
     def __init__(
@@ -120,10 +125,27 @@ class TemporalConvNet(nn.Module):
         n_outputs: int = 1,
         use_attention: bool = True,
         kernel_size: int = 3,
+        num_assets: int = 0,  # NEW: Number of assets (0 = no asset embedding)
+        asset_emb_dim: int = 8,  # NEW: Asset embedding dimension
     ) -> None:
         super().__init__()
+        
+        # Asset embedding (optional)
+        self.num_assets = num_assets
+        self.asset_emb_dim = asset_emb_dim
+        
+        if num_assets > 0:
+            self.asset_embedding = nn.Embedding(num_assets, asset_emb_dim)
+            # Input channels = original channels + asset embedding dim
+            input_channels = n_channels + asset_emb_dim
+            print(f"  [TemporalConvNet] Asset-aware mode: {num_assets} assets, "
+                  f"emb_dim={asset_emb_dim}, input_channels={input_channels}")
+        else:
+            self.asset_embedding = None
+            input_channels = n_channels
+        
         self.input_proj = nn.Sequential(
-            nn.Conv1d(n_channels, mid_channels, kernel_size=1),
+            nn.Conv1d(input_channels, mid_channels, kernel_size=1),
             nn.GELU(),
         )
         self.blocks = nn.ModuleList(
@@ -137,7 +159,36 @@ class TemporalConvNet(nn.Module):
             nn.Linear(hidden_dim, n_outputs),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, asset_ids: torch.Tensor = None) -> torch.Tensor:
+        """
+        Forward pass with optional asset context.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Time-series input [batch, channels, length]
+        asset_ids : torch.Tensor, optional
+            Asset IDs [batch] (required if num_assets > 0)
+        
+        Returns
+        -------
+        output : torch.Tensor
+            Predictions [batch, n_outputs]
+        """
+        if self.asset_embedding is not None:
+            if asset_ids is None:
+                raise ValueError("asset_ids required when num_assets > 0")
+            
+            # Get asset embeddings [batch, emb_dim]
+            asset_emb = self.asset_embedding(asset_ids)
+            
+            # Expand to match time dimension [batch, emb_dim, length]
+            batch_size, _, seq_len = x.shape
+            asset_emb_expanded = asset_emb.unsqueeze(-1).expand(batch_size, self.asset_emb_dim, seq_len)
+            
+            # Concatenate with time-series input [batch, channels + emb_dim, length]
+            x = torch.cat([x, asset_emb_expanded], dim=1)
+        
         x = self.input_proj(x)
         for block in self.blocks:
             x = block(x)
