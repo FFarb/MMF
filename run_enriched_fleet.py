@@ -576,10 +576,56 @@ def run_enriched_fleet_training(
                 'f1': f1,
                 'accuracy': accuracy,
                 'expectancy': expectancy,
+                'y_pred_proba': y_pred_proba,  # Save probabilities
+                'y_pred': y_pred,  # Save predictions
+                'timestamps': timestamp_col.iloc[val_idx],  # Save timestamps
+                'X_val': X_val,  # Save validation features for asset identification
             })
             
             del X_train, X_val, y_train, y_val, moe
             gc.collect()
+        
+        # Save predictions for this cluster
+        print(f"\n[Predictions] Saving predictions for Cluster {cluster_id}...")
+        for asset in members:
+            if asset not in per_asset_results or len(per_asset_results[asset]) == 0:
+                continue
+            
+            # Collect all predictions for this asset across folds
+            asset_predictions = []
+            
+            for fold_res in fold_results:
+                # Get asset-specific predictions from this fold
+                X_val = fold_res['X_val']
+                if 'asset_id' in X_val.columns:
+                    asset_mask = X_val['asset_id'] == asset
+                    
+                    if asset_mask.sum() > 0:
+                        timestamps = fold_res['timestamps'].iloc[asset_mask.values]
+                        probas = fold_res['y_pred_proba'][asset_mask.values]
+                        preds = fold_res['y_pred'][asset_mask.values]
+                        
+                        for ts, prob, pred in zip(timestamps, probas, preds):
+                            asset_predictions.append({
+                                'timestamp': ts,
+                                'probability': prob,
+                                'signal': 1 if pred == 1 else -1,  # Convert to +1/-1
+                                'fold': fold_res['fold'],
+                            })
+            
+            if len(asset_predictions) > 0:
+                # Save to CSV
+                pred_df = pd.DataFrame(asset_predictions)
+                pred_df = pred_df.sort_values('timestamp')
+                
+                # Add close price from original data
+                if asset in asset_data:
+                    asset_close = asset_data[asset]['close'].reindex(pred_df['timestamp'])
+                    pred_df['close'] = asset_close.values
+                
+                pred_file = Path(f"artifacts/fleet_predictions_{asset}.csv")
+                pred_df.to_csv(pred_file, index=False)
+                print(f"  ✓ Saved {len(pred_df)} predictions for {asset} to {pred_file}")
         
         # Cluster summary
         cluster_df_results = pd.DataFrame(fold_results)
