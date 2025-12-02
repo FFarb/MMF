@@ -249,6 +249,9 @@ class AssetClusterer:
         """
         Fit the clustering model and return cluster assignments.
         
+        BTCUSDT is force-isolated into Cluster 0 to ensure a pure market factor.
+        All other assets are clustered separately and assigned to Cluster 1+.
+        
         Parameters
         ----------
         data_dict : dict
@@ -260,63 +263,105 @@ class AssetClusterer:
             Clustering result with cluster assignments and metadata
         """
         print("\n" + "=" * 72)
-        print("ASSET CLUSTERING ENGINE")
+        print("ASSET CLUSTERING ENGINE (BTC-ISOLATED)")
         print("=" * 72)
         
-        # Step 1: Align timestamps and extract features
-        print("\n[Step 1] Aligning timestamps...")
-        feature_matrix, symbols = self._align_timestamps(data_dict)
+        # Step 1: Check if BTCUSDT exists
+        has_btc = 'BTCUSDT' in data_dict
         
-        # Step 2: Compute correlation matrix
-        print("\n[Step 2] Computing correlation matrix...")
+        if has_btc:
+            print("\n[BTC ISOLATION] BTCUSDT detected - forcing into Cluster 0")
+            print("  Rationale: Prevent meme coins from polluting market factor")
+            
+            # Separate BTC from altcoins
+            btc_data = {'BTCUSDT': data_dict['BTCUSDT']}
+            altcoin_data = {k: v for k, v in data_dict.items() if k != 'BTCUSDT'}
+            
+            print(f"  BTC: 1 asset (Cluster 0)")
+            print(f"  Altcoins: {len(altcoin_data)} assets (to be clustered)")
+        else:
+            print("\n[BTC ISOLATION] BTCUSDT not found - proceeding with normal clustering")
+            altcoin_data = data_dict
+        
+        # Step 2: Align timestamps and extract features (altcoins only)
+        print("\n[Step 1] Aligning timestamps for altcoins...")
+        feature_matrix, symbols = self._align_timestamps(altcoin_data)
+        
+        # Step 3: Compute correlation matrix (altcoins only)
+        print("\n[Step 2] Computing correlation matrix for altcoins...")
         corr_matrix = self._compute_correlation_matrix(feature_matrix)
         
         print(f"  Correlation range: [{corr_matrix.values.min():.3f}, {corr_matrix.values.max():.3f}]")
         
-        # Step 3: Convert correlation to distance
-        # Distance = 1 - |correlation|
-        # This treats both positive and negative correlation as similarity
+        # Step 4: Convert correlation to distance
         distance_matrix = 1.0 - np.abs(corr_matrix.values)
-        
-        # Ensure distance matrix is symmetric and has zero diagonal
         distance_matrix = (distance_matrix + distance_matrix.T) / 2
         np.fill_diagonal(distance_matrix, 0)
-        
-        # Convert to condensed distance matrix for linkage
         condensed_dist = squareform(distance_matrix, checks=False)
         
-        # Step 4: Hierarchical clustering
-        print(f"\n[Step 3] Hierarchical clustering (method={self.method})...")
+        # Step 5: Hierarchical clustering (altcoins only)
+        print(f"\n[Step 3] Hierarchical clustering altcoins (method={self.method})...")
         linkage_matrix = linkage(condensed_dist, method=self.method)
         
-        # Step 5: Form clusters
-        if self.n_clusters is not None:
-            print(f"  Forming {self.n_clusters} clusters...")
-            cluster_labels = fcluster(linkage_matrix, self.n_clusters, criterion='maxclust')
+        # Step 6: Form clusters for altcoins
+        if has_btc:
+            # Reduce n_clusters by 1 since BTC takes Cluster 0
+            altcoin_n_clusters = self.n_clusters - 1 if self.n_clusters is not None else None
         else:
+            altcoin_n_clusters = self.n_clusters
+        
+        if altcoin_n_clusters is not None and altcoin_n_clusters > 0:
+            print(f"  Forming {altcoin_n_clusters} altcoin clusters...")
+            cluster_labels = fcluster(linkage_matrix, altcoin_n_clusters, criterion='maxclust')
+        elif self.distance_threshold is not None:
             print(f"  Forming clusters with distance threshold {self.distance_threshold}...")
             cluster_labels = fcluster(linkage_matrix, self.distance_threshold, criterion='distance')
+        else:
+            # Fallback: single cluster for all altcoins
+            print("  Warning: No clustering criteria specified, grouping all altcoins together")
+            cluster_labels = np.ones(len(symbols), dtype=int)
         
-        # Convert to 0-indexed
-        cluster_labels = cluster_labels - 1
+        # Step 7: Shift cluster labels to start from 1 (if BTC exists)
+        if has_btc:
+            # Altcoin clusters start from 1 (BTC is 0)
+            cluster_labels = cluster_labels  # Already 1-indexed from fcluster
+        else:
+            # No BTC - convert to 0-indexed
+            cluster_labels = cluster_labels - 1
         
-        # Step 6: Create cluster map and members
-        cluster_map = {symbol: int(label) for symbol, label in zip(symbols, cluster_labels)}
-        
+        # Step 8: Create cluster map
+        cluster_map = {}
         cluster_members = {}
-        for symbol, cluster_id in cluster_map.items():
+        
+        # Add BTC to Cluster 0 (if exists)
+        if has_btc:
+            cluster_map['BTCUSDT'] = 0
+            cluster_members[0] = ['BTCUSDT']
+        
+        # Add altcoins to their clusters
+        for symbol, label in zip(symbols, cluster_labels):
+            cluster_id = int(label)
+            cluster_map[symbol] = cluster_id
+            
             if cluster_id not in cluster_members:
                 cluster_members[cluster_id] = []
             cluster_members[cluster_id].append(symbol)
         
         n_clusters_formed = len(cluster_members)
-        print(f"  Formed {n_clusters_formed} clusters")
+        print(f"  Formed {n_clusters_formed} total clusters (including BTC)")
         
-        # Step 7: Identify dominant cluster
-        print("\n[Step 4] Identifying dominant cluster...")
-        dominant_cluster_id = self._identify_dominant_cluster(cluster_members, data_dict)
+        # Step 9: Set dominant cluster
+        if has_btc:
+            # Force BTC cluster as dominant
+            dominant_cluster_id = 0
+            print("\n[Step 4] Dominant cluster: Cluster 0 (BTCUSDT) - FORCED")
+            print("  Rationale: BTC is the market leader, pure factor extraction")
+        else:
+            # Fallback to normal logic
+            print("\n[Step 4] Identifying dominant cluster...")
+            dominant_cluster_id = self._identify_dominant_cluster(cluster_members, data_dict)
         
-        # Step 8: Print cluster summary
+        # Step 10: Print cluster summary
         print("\n" + "-" * 72)
         print("CLUSTER SUMMARY")
         print("-" * 72)
@@ -324,7 +369,8 @@ class AssetClusterer:
         for cluster_id in sorted(cluster_members.keys()):
             members = cluster_members[cluster_id]
             is_dominant = " (DOMINANT)" if cluster_id == dominant_cluster_id else ""
-            print(f"Cluster {cluster_id}{is_dominant}: {', '.join(sorted(members))}")
+            is_btc = " [BTC-ISOLATED]" if cluster_id == 0 and has_btc else ""
+            print(f"Cluster {cluster_id}{is_dominant}{is_btc}: {', '.join(sorted(members))}")
         
         # Create result
         result = ClusterResult(
