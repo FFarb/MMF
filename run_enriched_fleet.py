@@ -59,6 +59,28 @@ from run_deep_research import (
     LABEL_THRESHOLD,
 )
 
+# ==============================================================================
+# 🔥 HOTFIX: TARGET HORIZON OVERRIDE
+# Force H1 Intraday Mode. Original 36h lookahead is too slow for H1/M5 strategy.
+# This aligns the target with the M5 microstructure "hints".
+# ==============================================================================
+print("=" * 72)
+print("⚠️  TRAINING HORIZON OVERRIDE")
+print("=" * 72)
+print(f"  [CONFIG] Original Lookahead: {LABEL_LOOKAHEAD} bars (from run_deep_research)")
+print(f"  [CONFIG] Original Threshold: {LABEL_THRESHOLD}")
+print("")
+print("  [OVERRIDE] Switching to H1 Intraday Mode...")
+LABEL_LOOKAHEAD = 4  # Override: 4 hours (Intraday/Scalp)
+LABEL_THRESHOLD = 0.002  # Override: 0.2% (Lower threshold for shorter horizon)
+print(f"  [CONFIG] New Lookahead: {LABEL_LOOKAHEAD} bars (4 hours - H1 Intraday)")
+print(f"  [CONFIG] New Threshold: {LABEL_THRESHOLD} (0.2% price move)")
+print("")
+print("  Rationale: 36h lookahead ignores M5 microstructure features.")
+print("             4h lookahead activates M5 hints for precise entry timing.")
+print("=" * 72)
+# ==============================================================================
+
 # The Fleet: 10 major cryptocurrencies
 FLEET_ASSETS = [
     'BTCUSDT',
@@ -72,6 +94,7 @@ FLEET_ASSETS = [
     'LINKUSDT',
     'LTCUSDT',
 ]
+
 
 
 def build_labels(df: pd.DataFrame) -> pd.Series:
