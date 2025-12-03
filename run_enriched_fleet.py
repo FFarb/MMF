@@ -72,9 +72,9 @@ print(f"  [CONFIG] Original Threshold: {LABEL_THRESHOLD}")
 print("")
 print("  [OVERRIDE] Switching to H1 Intraday Mode...")
 LABEL_LOOKAHEAD = 4  # Override: 4 hours (Intraday/Scalp)
-LABEL_THRESHOLD = 0.002  # Override: 0.2% (Lower threshold for shorter horizon)
+LABEL_THRESHOLD = 0.0015  # Override: 0.15% (Relaxed for more volume, sniper threshold compensates)
 print(f"  [CONFIG] New Lookahead: {LABEL_LOOKAHEAD} bars (4 hours - H1 Intraday)")
-print(f"  [CONFIG] New Threshold: {LABEL_THRESHOLD} (0.2% price move)")
+print(f"  [CONFIG] New Threshold: {LABEL_THRESHOLD} (0.15% price move - more trades)")
 print("")
 print("  Rationale: 36h lookahead ignores M5 microstructure features.")
 print("             4h lookahead activates M5 hints for precise entry timing.")
@@ -572,7 +572,11 @@ def run_enriched_fleet_training(
             
             # Get predictions
             y_pred_proba = moe.predict_proba(X_val)[:, 1]
-            y_pred = (y_pred_proba >= 0.5).astype(int)
+            
+            # Use sniper threshold (0.55) instead of coin-flip (0.5)
+            # This trades recall for precision - "снайперский огонь"
+            threshold = cfg.META_PROB_THRESHOLD if hasattr(cfg, 'META_PROB_THRESHOLD') else 0.55
+            y_pred = (y_pred_proba >= threshold).astype(int)
             
             # Overall metrics
             tp = ((y_pred == 1) & (y_val == 1)).sum()
