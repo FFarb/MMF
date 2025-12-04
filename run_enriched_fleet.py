@@ -81,7 +81,9 @@ print("             4h lookahead activates M5 hints for precise entry timing.")
 print("=" * 72)
 # ==============================================================================
 
-# The Fleet: 10 major cryptocurrencies
+# The Fleet: 8 high-performance cryptocurrencies
+# REMOVED: DOGEUSDT (48.20% precision - underperformer)
+# REMOVED: AVAXUSDT (44.15% precision - model misalignment)
 FLEET_ASSETS = [
     'BTCUSDT',
     'ETHUSDT',
@@ -89,8 +91,8 @@ FLEET_ASSETS = [
     'BNBUSDT',
     'XRPUSDT',
     'ADAUSDT',
-    'DOGEUSDT',
-    'AVAXUSDT',
+    # 'DOGEUSDT',  # REMOVED: Consistently <50% precision
+    # 'AVAXUSDT',  # REMOVED: Inverse correlation with confidence
     'LINKUSDT',
     'LTCUSDT',
 ]
