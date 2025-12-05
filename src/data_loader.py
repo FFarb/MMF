@@ -22,11 +22,14 @@ from pybit.unified_trading import HTTP
 from .config import (
     CACHE_DIR,
     DAYS_BACK,
+    HOURS_BACK,
+    MINUTES_BACK,
     INTERVAL,
     MAX_FETCH_BATCHES,
     MULTI_ASSET_CACHE,
     PLOT_TEMPLATE,
     SYMBOLS,
+    get_lookback_timedelta,
 )
 
 
@@ -157,6 +160,62 @@ def make_global_loader(
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
+def validate_time_conversions(df: pd.DataFrame, symbol: str) -> None:
+    """
+    Validate that time conversions are logically correct.
+    
+    Checks:
+    1. Index is datetime
+    2. No duplicate timestamps
+    3. Timestamps are monotonically increasing
+    4. No NaT (Not a Time) values
+    5. Timestamps are in reasonable range (not in future, not before 2010)
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with datetime index
+    symbol : str
+        Asset symbol (for error messages)
+    
+    Raises
+    ------
+    ValueError
+        If any validation check fails
+    """
+    # Check 1: Index is datetime
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError(f"{symbol}: Index is not DatetimeIndex (type: {type(df.index)})")
+    
+    # Check 2: No duplicates
+    if df.index.duplicated().any():
+        n_dupes = df.index.duplicated().sum()
+        raise ValueError(f"{symbol}: Found {n_dupes} duplicate timestamps")
+    
+    # Check 3: Monotonically increasing
+    if not df.index.is_monotonic_increasing:
+        raise ValueError(f"{symbol}: Timestamps are not monotonically increasing")
+    
+    # Check 4: No NaT values
+    if df.index.isna().any():
+        n_nat = df.index.isna().sum()
+        raise ValueError(f"{symbol}: Found {n_nat} NaT (Not a Time) values")
+    
+    # Check 5: Reasonable range
+    now = datetime.utcnow()
+    min_date = datetime(2010, 1, 1)  # Bitcoin genesis: 2009-01-03
+    
+    if df.index.min() < min_date:
+        raise ValueError(f"{symbol}: Earliest timestamp ({df.index.min()}) is before 2010")
+    
+    if df.index.max() > now + timedelta(hours=1):  # Allow 1 hour clock skew
+        raise ValueError(f"{symbol}: Latest timestamp ({df.index.max()}) is in the future")
+    
+    print(f"       [VALIDATION] ✓ Time conversions valid")
+    print(f"       [VALIDATION] Range: {df.index.min()} to {df.index.max()}")
+    print(f"       [VALIDATION] Samples: {len(df)}, Duplicates: 0, NaT: 0")
+
+
 class MarketDataLoader:
     """
     Smart Bybit data loader that combines cached parquet storage with incremental API fetches.
@@ -180,19 +239,60 @@ class MarketDataLoader:
 
     def get_data(
         self,
-        days_back: int = DAYS_BACK,
+        days_back: Optional[int] = None,
+        hours_back: Optional[int] = None,
+        minutes_back: Optional[int] = None,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         force_refresh: bool = False,
     ) -> pd.DataFrame:
         """
         Return OHLCV data for the requested window using local caches when possible.
+        
+        Parameters
+        ----------
+        days_back : int, optional
+            Number of days to look back (default: DAYS_BACK from config)
+        hours_back : int, optional
+            Additional hours to look back (default: HOURS_BACK from config)
+        minutes_back : int, optional
+            Additional minutes to look back (default: MINUTES_BACK from config)
+        start_time : datetime, optional
+            Explicit start time (overrides days/hours/minutes)
+        end_time : datetime, optional
+            Explicit end time (default: now)
+        force_refresh : bool
+            Force fresh API fetch
+        
+        Returns
+        -------
+        pd.DataFrame
+            OHLCV data with datetime index
         """
         end_time = end_time or datetime.utcnow()
-        start_time = start_time or (end_time - timedelta(days=days_back))
-
+        
+        if start_time is None:
+            # Use days/hours/minutes parameters
+            lookback = get_lookback_timedelta(
+                days=days_back,
+                hours=hours_back,
+                minutes=minutes_back
+            )
+            start_time = end_time - lookback
+        
+        # Validation: Ensure start_time < end_time
+        if start_time >= end_time:
+            raise ValueError(f"Invalid time range: start_time ({start_time}) >= end_time ({end_time})")
+        
+        # Log the actual time window with duration breakdown
+        duration = end_time - start_time
+        duration_days = duration.days
+        duration_hours = duration.seconds // 3600
+        duration_minutes = (duration.seconds % 3600) // 60
+        
         print(f"\n[DATA] Fetching {self.symbol} @ {self.interval}m")
         print(f"       Window: {start_time} to {end_time}")
+        print(f"       Duration: {duration_days}d {duration_hours}h {duration_minutes}m")
 
         if force_refresh or not self.cache_file.exists():
             print("       Cache miss or forced refresh to fetching full range...")
@@ -201,6 +301,14 @@ class MarketDataLoader:
             return self._filter_range(fresh, start_time, end_time)
 
         cached_df = self._load_cache()
+        
+        # Check if cache is empty (corrupted or invalid)
+        if cached_df.empty or len(cached_df) == 0:
+            print("       Cache is empty, fetching full range...")
+            fresh = self._fetch_data(int(start_time.timestamp() * 1000), int(end_time.timestamp() * 1000))
+            self._write_cache(fresh)
+            return self._filter_range(fresh, start_time, end_time)
+        
         cache_start = cached_df.index[0].to_pydatetime()
         cache_end = cached_df.index[-1].to_pydatetime()
 
@@ -253,7 +361,9 @@ class MarketDataLoader:
 
     def fetch_all_assets(
         self,
-        days_back: int = DAYS_BACK,
+        days_back: Optional[int] = None,
+        hours_back: Optional[int] = None,
+        minutes_back: Optional[int] = None,
         force_refresh: bool = False,
     ) -> pd.DataFrame:
         """
@@ -264,10 +374,14 @@ class MarketDataLoader:
         
         Parameters
         ----------
-        days_back : int
-            Number of days of historical data to fetch for each asset.
+        days_back : int, optional
+            Number of days of historical data to fetch for each asset
+        hours_back : int, optional
+            Additional hours of historical data to fetch
+        minutes_back : int, optional
+            Additional minutes of historical data to fetch
         force_refresh : bool
-            If True, bypass cache and fetch fresh data.
+            If True, bypass cache and fetch fresh data
             
         Returns
         -------
@@ -303,7 +417,12 @@ class MarketDataLoader:
             )
             
             try:
-                df = loader.get_data(days_back=days_back, force_refresh=force_refresh)
+                df = loader.get_data(
+                    days_back=days_back,
+                    hours_back=hours_back,
+                    minutes_back=minutes_back,
+                    force_refresh=force_refresh
+                )
                 if df.empty:
                     print(f"      WARNING: No data retrieved for {symbol}, skipping...")
                     continue
@@ -400,6 +519,10 @@ class MarketDataLoader:
 
         df = df.drop(columns=["turnover"])
         df = df.sort_values("timestamp").set_index("timestamp")
+        
+        # VALIDATION: Check time conversions
+        validate_time_conversions(df, self.symbol)
+        
         return df
 
 

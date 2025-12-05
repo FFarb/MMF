@@ -275,7 +275,7 @@ class FractionalDifferentiator:
         self,
         series: Union[pd.Series, np.ndarray],
         precision: float = 0.01,
-        max_d: float = 1.0,
+        max_d: float = 0.65,  # SOFT CAP: Prevent memory burnout
         adf_pvalue_threshold: float = 0.05,
         verbose: bool = True
     ) -> float:
@@ -283,7 +283,12 @@ class FractionalDifferentiator:
         Find the minimum d value that makes the series stationary.
         
         Iterates d from 0.0 to max_d and applies the Augmented Dickey-Fuller (ADF)
-        test to determine stationarity. Returns the minimum d where p-value < threshold.
+        test to determine stationarity. Returns the minimum d where p-value < threshold,
+        OR max_d if no stationary d is found (accepting "stationary enough").
+        
+        **ADAPTIVE MEMORY PATCH**: Default max_d=0.65 prevents aggressive differentiation
+        that destroys market memory on volatile assets. Better to preserve some signal
+        with slight non-stationarity than achieve perfect stationarity with no memory.
         
         This is useful for finding the optimal balance between stationarity and
         memory preservation.
@@ -294,8 +299,10 @@ class FractionalDifferentiator:
             Input time series
         precision : float, default=0.01
             Step size for d iteration (smaller = more precise but slower)
-        max_d : float, default=1.0
-            Maximum d value to test
+        max_d : float, default=0.65
+            **SOFT CAP**: Maximum d value to test. Assets that require d > 0.65
+            for strict stationarity will be capped here, preserving memory.
+            Original default was 1.0 (too aggressive for altcoins).
         adf_pvalue_threshold : float, default=0.05
             ADF test p-value threshold for stationarity
         verbose : bool, default=True
@@ -305,16 +312,22 @@ class FractionalDifferentiator:
         -------
         float
             Optimal d value (minimum d that achieves stationarity)
-            Returns max_d if no stationary d is found
+            Returns max_d if no stationary d is found (Soft Cap applied)
         
         Notes
         -----
         The ADF test null hypothesis is that the series has a unit root (non-stationary).
         We reject the null (conclude stationarity) when p-value < threshold.
+        
+        **Why Soft Cap?**
+        Diagnostics showed that volatile altcoins (e.g., ADAUSDT) required d ≈ 1.0
+        for strict stationarity, which destroyed memory (correlation < 0.25).
+        By capping at d=0.65, we preserve ~40-60% correlation, enabling Trend Expert
+        to function while accepting slight non-stationarity.
         """
         if verbose:
             print(f"\n[FracDiff] Finding optimal d for stationarity...")
-            print(f"  Precision: {precision}, Max d: {max_d}, ADF threshold: {adf_pvalue_threshold}")
+            print(f"  Precision: {precision}, Max d (SOFT CAP): {max_d}, ADF threshold: {adf_pvalue_threshold}")
         
         # Test original series first
         try:
@@ -326,7 +339,7 @@ class FractionalDifferentiator:
             
             if original_pvalue < adf_pvalue_threshold:
                 if verbose:
-                    print(f"  ✓ Series is already stationary (d=0.0)")
+                    print(f"  [OK] Series is already stationary (d=0.0)")
                 self.optimal_d_ = 0.0
                 return 0.0
         except Exception as e:
@@ -352,21 +365,29 @@ class FractionalDifferentiator:
                 if verbose and (d * 100) % 10 == 0:  # Print every 0.1
                     print(f"  d={d:.2f}: ADF p-value={pvalue:.4f}")
                 
-                # Check if stationary
+                # Check if stationary OR hit soft cap
                 if pvalue < adf_pvalue_threshold:
                     if verbose:
-                        print(f"  ✓ Found optimal d={d:.3f} (ADF p-value={pvalue:.4f})")
+                        print(f"  [OK] Found optimal d={d:.3f} (ADF p-value={pvalue:.4f})")
                     self.optimal_d_ = d
                     return d
+                elif d >= max_d - precision:
+                    # Hit soft cap - accept this d even if not strictly stationary
+                    if verbose:
+                        print(f"  [SOFT CAP] Reached max_d={max_d:.3f} (ADF p-value={pvalue:.4f})")
+                        print(f"  [SOFT CAP] Accepting d={max_d:.3f} to preserve memory (not strictly stationary)")
+                    self.optimal_d_ = max_d
+                    return max_d
             
             except Exception as e:
                 if verbose:
                     print(f"  Warning: ADF test failed for d={d:.2f}: {e}")
                 continue
         
-        # No stationary d found
+        # Fallback: return max_d (Soft Cap)
         if verbose:
-            print(f"  ⚠ No stationary d found, returning max_d={max_d}")
+            print(f"  [SOFT CAP] No stationary d found, returning max_d={max_d:.3f}")
+            print(f"  [SOFT CAP] Preserving memory over strict stationarity")
         
         self.optimal_d_ = max_d
         return max_d

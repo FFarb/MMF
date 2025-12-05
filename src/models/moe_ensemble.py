@@ -27,7 +27,7 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
 from .cnn_temporal import CNNExpert
-from .hybrid_ode import HybridNeuralODEExpert  # Hybrid: Physics + Sparse Neural
+from .sde_expert import SDEExpert  # LaP-SDE: Physics + Uncertainty Quantification
 from ..config import (
     CNN_ARTIFACTS_DIR,
     CNN_BATCH_SIZE,
@@ -344,14 +344,14 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
     
     PHYSICS-ENHANCED ENSEMBLE:
     - Removed: GraphVisionary (complex, unstable)
-    - Upgraded: Hybrid Neural ODE (physics prior + sparse neural)
+    - Upgraded: LaP-SDE (physics-informed SDE with uncertainty quantification)
     
     Experts:
     1. Trend (HistGBM) - Sustainable trends
     2. Range (KNN) - Local patterns
     3. Stress (LogReg) - Crash protection
     4. Pattern (CNN) - Temporal sequences
-    5. Elastic (Hybrid ODE) - Physics + sparse non-linear correction
+    5. Stochastic (LaP-SDE) - Physics + uncertainty quantification
     """
     physics_features: Sequence[str] = field(
         default_factory=lambda: (
@@ -418,20 +418,18 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             random_state=self.random_state,
         )
         
-        # Expert 4: Elastic (Hybrid ODE) - Physics + Sparse Neural
-        self.hybrid_ode_expert: Optional[HybridNeuralODEExpert] = None
+        # Expert 4: Stochastic (LaP-SDE) - Physics + Uncertainty Quantification
+        self.sde_expert: Optional[SDEExpert] = None
         self._ou_enabled = False  # Keep variable name for compatibility
         if self.use_ou:  # Keep param name for compatibility
-            self.hybrid_ode_expert = HybridNeuralODEExpert(
-                hidden_dim=16,        # Small network (sparsity!)
-                latent_dim=8,         # Compact latent space
+            self.sde_expert = SDEExpert(
+                latent_dim=64,        # Max capacity (ARD will reduce)
+                hidden_dims=[512, 256, 128],  # Deep encoder
                 lr=0.001,             # Conservative learning rate
-                epochs=100,           # More epochs for convergence
-                lambda_l1=0.01,       # L1 penalty (neuron burning)
-                lambda_gate=0.1,      # Gate penalty (prefer physics)
-                lambda_jac=0.001,     # Jacobian reg (smooth dynamics)
-                time_steps=10,
-                solver='euler',       # Stable solver
+                epochs=100,           # Training epochs
+                beta_kl=1.0,          # ARD penalty (dimensionality control)
+                lambda_sparse=0.01,   # Physics sparsity
+                time_steps=10,        # SDE integration steps
                 random_state=self.random_state,
             )
             self._ou_enabled = True
@@ -522,16 +520,16 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         print("  [MoE] Training Expert 3: Stress (LogReg)...")
         self.stress_expert.fit(X_scaled, y_array, sample_weight=sample_weight)
         
-        # Train Elastic Expert (Hybrid ODE)
-        if self._ou_enabled and self.hybrid_ode_expert is not None:
-            print("  [MoE] Training Expert 4: Elastic (Hybrid ODE - Physics + Sparse Neural)...")
-            self.hybrid_ode_expert.fit(base_df, y_array)
+        # Train Stochastic Expert (LaP-SDE)
+        if self._ou_enabled and self.sde_expert is not None:
+            print("  [MoE] Training Expert 4: Stochastic (LaP-SDE - Physics + Uncertainty)...")
+            self.sde_expert.fit(base_df, y_array)
             
-            # Get diagnostics
-            diag = self.hybrid_ode_expert.get_diagnostics()
-            alpha = diag.get('alpha', 0)
-            sparsity = diag.get('neural_sparsity', 0)
-            print(f"    [HybridODE] α={alpha:.4f}, sparsity={sparsity:.4f}")
+            # Get telemetry
+            telemetry = self.sde_expert.get_telemetry()
+            active_dims = telemetry.get('active_dimensions', 0)
+            snr = telemetry.get('signal_to_noise', 0)
+            print(f"    [LaP-SDE] Active Dims: {active_dims}, SNR: {snr:.4f}")
         
         # Train Pattern Expert (CNN)
         print("  [MoE] Training Expert 5: Pattern (CNN)...")
@@ -546,7 +544,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             'trend': self.trend_expert,
             'range': self.range_expert,
             'stress': self.stress_expert,
-            'ou': self.hybrid_ode_expert if self._ou_enabled else None,  # Hybrid ODE
+            'ou': self.sde_expert if self._ou_enabled else None,  # LaP-SDE
             'cnn': self.cnn_expert if self._cnn_enabled else None,
         }
         
@@ -600,7 +598,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         self._gate_classes_ = list(self.gating_network.classes_)
         self._fitted = True
         
-        print("  [MoE] ✓ All experts trained successfully")
+        print("  [MoE] [OK] All experts trained successfully")
         return self
     
     def _train_cnn_expert(self, df: pd.DataFrame, y_array: np.ndarray) -> None:
@@ -789,10 +787,10 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             weights[:, [2]] * p_stress
         )
         
-        # Add Hybrid ODE expert if enabled
-        if self._ou_enabled and self.hybrid_ode_expert is not None:
-            p_hybrid = self.hybrid_ode_expert.predict_proba(base_df)
-            blended += weights[:, [expert_idx]] * p_hybrid
+        # Add LaP-SDE expert if enabled
+        if self._ou_enabled and self.sde_expert is not None and weights.shape[1] > expert_idx:
+            p_sde = self.sde_expert.predict_proba(base_df)
+            blended += weights[:, [expert_idx]] * p_sde
             expert_idx += 1
         
         # Add CNN if enabled

@@ -181,8 +181,8 @@ def run_enriched_fleet_training(
     assets: List[str] = FLEET_ASSETS,
     n_clusters: int = 3,
     n_folds: int = 5,
-    history_days_h1: int = 730,  # H1 history (2 years)
-    history_days_m5: int = 150,  # M5 history (5 months)
+    history_days_h1: int = 730,  # Days of H1 data (730 days = 730*24 = 17,520 H1 bars)
+    history_days_m5: int = 150,  # Days of M5 data (150 days = 150*288 = 43,200 M5 bars)
     holdout_days: int = 0,  # Days to exclude from training (for validation)
     max_frac_diff_d: float = 0.65,
     market_factor_method: str = 'pca',
@@ -200,8 +200,10 @@ def run_enriched_fleet_training(
         Number of cross-validation folds
     history_days_h1 : int
         Days of H1 history (default: 730 = 2 years)
+        Note: 1 day = 24 H1 bars, so 730 days = 17,520 bars
     history_days_m5 : int
         Days of M5 history for microstructure (default: 150 = 5 months)
+        Note: 1 day = 288 M5 bars (24h * 60m / 5m), so 150 days = 43,200 bars
     holdout_days : int
         Days to exclude from training for walk-forward validation (default: 0)
         Example: 180 = train on older data, validate sniper on last 180 days
@@ -213,10 +215,12 @@ def run_enriched_fleet_training(
     print("=" * 72)
     print("ENRICHED FLEET TRAINING: H1 Main + M5 Hints")
     print(f"Training {len(assets)} assets with microstructure enrichment")
-    print(f"H1 History: {history_days_h1} days, M5 History: {history_days_m5} days")
+    print(f"H1 History: {history_days_h1} days ({history_days_h1 * 24:,} bars)")
+    print(f"M5 History: {history_days_m5} days ({history_days_m5 * 288:,} bars)")
     if holdout_days > 0:
         print(f"Holdout Period: {holdout_days} days (excluded from training)")
         print(f"Purpose: Walk-forward validation for sniper simulation")
+    print(f"Cross-Validation Folds: {n_folds}")
     print("=" * 72)
     
     # Step 1: Load and Preprocess Data
@@ -499,7 +503,13 @@ def run_enriched_fleet_training(
         print(f"[Features] Passthrough: {len(passthrough_cols)} (includes {len(micro_cols)} microstructure)")
         print(f"[Features] Tensor-Flex Candidates: {len(tensor_feature_cols)}")
         
-        # Cross-validation
+        
+        # Cross-validation with TimeSeriesSplit
+        # CRITICAL: TimeSeriesSplit ensures NO FUTURE DATA LEAKAGE
+        # Each fold uses only past data for training, future data for validation
+        # Example: Fold 1: Train[0:100], Val[100:200]
+        #          Fold 2: Train[0:200], Val[200:300]
+        # This mimics real-world trading where you can only use past data
         tscv = TimeSeriesSplit(n_splits=n_folds)
         fold_results = []
         
@@ -778,19 +788,55 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Enriched Fleet Training: H1 Main + M5 Hints"
+        description="Enriched Fleet Training: H1 Main + M5 Hints",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  # Default: 2 years H1, 5 months M5
+  python run_enriched_fleet.py
+  
+  # Custom: 1 year H1, 3 months M5, 10 folds
+  python run_enriched_fleet.py --h1-days 365 --m5-days 90 --folds 10
+  
+  # Quick test: 30 days H1, 7 days M5, 3 folds
+  python run_enriched_fleet.py --h1-days 30 --m5-days 7 --folds 3
+  
+Note: 
+  --h1-days 1 = 24 H1 bars (1 day of hourly data)
+  --m5-days 1 = 288 M5 bars (1 day of 5-minute data)
+"""
     )
     parser.add_argument("--clusters", type=int, default=3, help="Number of clusters")
-    parser.add_argument("--folds", type=int, default=5, help="Number of CV folds")
-    parser.add_argument("--h1-days", type=int, default=730, help="Days of H1 history")
-    parser.add_argument("--m5-days", type=int, default=150, help="Days of M5 history for microstructure")
-    parser.add_argument("--holdout-days", type=int, default=0, help="Days to exclude from training (for walk-forward validation)")
+    parser.add_argument("--folds", type=int, default=5, help="Number of CV folds (min: 2)")
+    parser.add_argument("--h1-days", type=int, default=730, 
+                       help="Days of H1 history (1 day = 24 bars). Default: 730 = 2 years")
+    parser.add_argument("--m5-days", type=int, default=150, 
+                       help="Days of M5 history (1 day = 288 bars). Default: 150 = 5 months")
+    parser.add_argument("--holdout-days", type=int, default=0, 
+                       help="Days to exclude from training (for walk-forward validation)")
     parser.add_argument("--max-d", type=float, default=0.65, help="Max frac diff order")
     parser.add_argument("--factor-method", type=str, default="pca",
                        choices=['pca', 'mean', 'weighted_mean'],
                        help="Market factor extraction method")
     
     args = parser.parse_args()
+    
+    # Validate parameters
+    if args.h1_days <= 0:
+        parser.error("--h1-days must be positive")
+    if args.m5_days <= 0:
+        parser.error("--m5-days must be positive")
+    if args.folds < 2:
+        parser.error("--folds must be at least 2")
+    
+    print("\n" + "=" * 72)
+    print("ENRICHED FLEET TRAINING - PARAMETER SUMMARY")
+    print("=" * 72)
+    print(f"H1 Data: {args.h1_days} days = {args.h1_days * 24:,} hourly bars")
+    print(f"M5 Data: {args.m5_days} days = {args.m5_days * 288:,} 5-minute bars")
+    print(f"Holdout: {args.holdout_days} days")
+    print(f"CV Folds: {args.folds}")
+    print(f"Clusters: {args.clusters}")
+    print("=" * 72 + "\n")
     
     run_enriched_fleet_training(
         assets=FLEET_ASSETS,

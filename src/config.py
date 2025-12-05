@@ -21,8 +21,44 @@ SYMBOLS = [
 ]
 INTERVAL = "5"  # 5-minute candles for high-frequency multi-asset analysis
 DAYS_BACK = 730  # Approx 2 years of data for deep history
+HOURS_BACK = 0   # Additional hours (added to days)
+MINUTES_BACK = 0 # Additional minutes (added to days + hours)
 CACHE_DIR = Path(".")
 MAX_FETCH_BATCHES = 10  # Safety net for paginated API calls
+
+
+def get_lookback_timedelta(days=None, hours=None, minutes=None):
+    """
+    Compute total lookback timedelta from days/hours/minutes.
+    
+    Parameters
+    ----------
+    days : int, optional
+        Number of days (default: DAYS_BACK)
+    hours : int, optional
+        Number of hours (default: HOURS_BACK)
+    minutes : int, optional
+        Number of minutes (default: MINUTES_BACK)
+    
+    Returns
+    -------
+    timedelta
+        Total lookback period
+    
+    Examples
+    --------
+    >>> get_lookback_timedelta(days=7)
+    timedelta(days=7)
+    >>> get_lookback_timedelta(days=1, hours=12, minutes=30)
+    timedelta(days=1, seconds=45000)
+    """
+    from datetime import timedelta
+    
+    d = days if days is not None else DAYS_BACK
+    h = hours if hours is not None else HOURS_BACK
+    m = minutes if minutes is not None else MINUTES_BACK
+    
+    return timedelta(days=d, hours=h, minutes=m)
 
 # --- Multi-Asset Storage ------------------------------------------------------
 MULTI_ASSET_CACHE = Path("multi_asset_cache.parquet")
