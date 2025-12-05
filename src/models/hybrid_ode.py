@@ -549,7 +549,7 @@ class HybridNeuralODEExpert(BaseEstimator, ClassifierMixin):
             'alpha': self.ode_func.alpha.item(),
             'linear_eigenvalues': torch.linalg.eigvals(
                 self.ode_func.linear.weight
-            ).cpu().numpy().tolist(),
+            ).detach().cpu().numpy().tolist(),
             'neural_sparsity': (
                 sum(p.abs().sum().item() for p in self.ode_func.neural_net.parameters()) /
                 sum(p.numel() for p in self.ode_func.neural_net.parameters())
