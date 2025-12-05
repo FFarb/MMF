@@ -81,9 +81,8 @@ print("             4h lookahead activates M5 hints for precise entry timing.")
 print("=" * 72)
 # ==============================================================================
 
-# The Fleet: 8 high-performance cryptocurrencies
-# REMOVED: DOGEUSDT (48.20% precision - underperformer)
-# REMOVED: AVAXUSDT (44.15% precision - model misalignment)
+# The Fleet: 10 major cryptocurrencies (FULL FLEET RESTORED)
+# Neural ODE will handle non-linear dynamics for all assets
 FLEET_ASSETS = [
     'BTCUSDT',
     'ETHUSDT',
@@ -91,8 +90,8 @@ FLEET_ASSETS = [
     'BNBUSDT',
     'XRPUSDT',
     'ADAUSDT',
-    # 'DOGEUSDT',  # REMOVED: Consistently <50% precision
-    # 'AVAXUSDT',  # REMOVED: Inverse correlation with confidence
+    'DOGEUSDT',  # RESTORED: Neural ODE will handle meme volatility
+    'AVAXUSDT',  # RESTORED: Neural ODE will fix model misalignment
     'LINKUSDT',
     'LTCUSDT',
 ]

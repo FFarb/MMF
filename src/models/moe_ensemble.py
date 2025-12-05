@@ -27,7 +27,7 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
 from .cnn_temporal import CNNExpert
-from .physics_experts import OUMeanReversionExpert
+from .physics_experts import NeuralODEExpert  # Upgraded from OUMeanReversionExpert
 from ..config import (
     CNN_ARTIFACTS_DIR,
     CNN_BATCH_SIZE,
@@ -344,14 +344,14 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
     
     PHYSICS-ENHANCED ENSEMBLE:
     - Removed: GraphVisionary (complex, unstable)
-    - Added: OUMeanReversionExpert (physics-based elasticity)
+    - Upgraded: Neural ODE (from linear OU to non-linear dynamics)
     
     Experts:
     1. Trend (HistGBM) - Sustainable trends
     2. Range (KNN) - Local patterns
     3. Stress (LogReg) - Crash protection
     4. Pattern (CNN) - Temporal sequences
-    5. Elastic (OU) - Mean reversion / elasticity
+    5. Elastic (Neural ODE) - Non-linear dynamics / mean reversion
     """
     physics_features: Sequence[str] = field(
         default_factory=lambda: (
@@ -418,13 +418,15 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             random_state=self.random_state,
         )
         
-        # Expert 4: Elastic (OU) - Physics-based mean reversion
-        self.ou_expert: Optional[OUMeanReversionExpert] = None
-        self._ou_enabled = False
-        if self.use_ou:
-            self.ou_expert = OUMeanReversionExpert(
-                alpha=self.ou_alpha,
-                lookback_window=self.ou_lookback,
+        # Expert 4: Elastic (Neural ODE) - Non-linear dynamics
+        self.neural_ode_expert: Optional[NeuralODEExpert] = None
+        self._ou_enabled = False  # Keep variable name for compatibility
+        if self.use_ou:  # Keep param name for compatibility
+            self.neural_ode_expert = NeuralODEExpert(
+                hidden_dim=32,
+                lr=0.01,
+                epochs=50,
+                time_steps=10,
                 random_state=self.random_state,
             )
             self._ou_enabled = True
@@ -515,12 +517,11 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         print("  [MoE] Training Expert 3: Stress (LogReg)...")
         self.stress_expert.fit(X_scaled, y_array, sample_weight=sample_weight)
         
-        # Train Elastic Expert (OU)
-        if self._ou_enabled and self.ou_expert is not None:
-            print("  [MoE] Training Expert 4: Elastic (OU Mean Reversion)...")
-            self.ou_expert.fit(base_df, y_array)
-            ou_params = self.ou_expert.get_ou_parameters()
-            print(f"    [OU] θ={ou_params['theta']:.3f}, μ={ou_params['mu']:.3f}, half-life={ou_params['half_life']:.1f}")
+        # Train Elastic Expert (Neural ODE)
+        if self._ou_enabled and self.neural_ode_expert is not None:
+            print("  [MoE] Training Expert 4: Elastic (Neural ODE - Non-linear Dynamics)...")
+            self.neural_ode_expert.fit(base_df, y_array)
+            print(f"    [NeuralODE] ✓ Trained with {self.neural_ode_expert.hidden_dim}D latent space")
         
         # Train Pattern Expert (CNN)
         print("  [MoE] Training Expert 5: Pattern (CNN)...")
@@ -535,7 +536,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             'trend': self.trend_expert,
             'range': self.range_expert,
             'stress': self.stress_expert,
-            'ou': self.ou_expert if self._ou_enabled else None,
+            'ou': self.neural_ode_expert if self._ou_enabled else None,  # Neural ODE
             'cnn': self.cnn_expert if self._cnn_enabled else None,
         }
         
@@ -778,10 +779,10 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
             weights[:, [2]] * p_stress
         )
         
-        # Add OU expert if enabled
-        if self._ou_enabled and self.ou_expert is not None:
-            p_ou = self.ou_expert.predict_proba(base_df)
-            blended += weights[:, [expert_idx]] * p_ou
+        # Add Neural ODE expert if enabled
+        if self._ou_enabled and self.neural_ode_expert is not None:
+            p_ode = self.neural_ode_expert.predict_proba(base_df)
+            blended += weights[:, [expert_idx]] * p_ode
             expert_idx += 1
         
         # Add CNN if enabled
