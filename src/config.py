@@ -45,7 +45,7 @@ FEATURE_STORE = Path("btc_1000_features.parquet")
 TOP_FEATURES = 25
 TRAIN_SPLIT = 0.8
 RANDOM_SEED = 42
-META_PROB_THRESHOLD = 0.60  # Precision Strike: Ultra-high confidence only
+META_PROB_THRESHOLD = 0.55  # Sniper mode: Higher precision, lower recall
 PRIMARY_RECALL_TARGET = 0.7
 
 # --- Alpha Council Feature Budget -------------------------------------------

@@ -70,33 +70,31 @@ print("=" * 72)
 print(f"  [CONFIG] Original Lookahead: {LABEL_LOOKAHEAD} bars (from run_deep_research)")
 print(f"  [CONFIG] Original Threshold: {LABEL_THRESHOLD}")
 print("")
-print("  [OVERRIDE] Switching to H1 Intraday Mode (PRECISION STRIKE)...")
+print("  [OVERRIDE] Switching to H1 Intraday Mode...")
 LABEL_LOOKAHEAD = 4  # Override: 4 hours (Intraday/Scalp)
-LABEL_THRESHOLD = 0.0025  # Override: 0.25% (STRICTER - filters noise trades)
+LABEL_THRESHOLD = 0.0015  # Override: 0.15% (Relaxed for more volume, sniper threshold compensates)
 print(f"  [CONFIG] New Lookahead: {LABEL_LOOKAHEAD} bars (4 hours - H1 Intraday)")
-print(f"  [CONFIG] New Threshold: {LABEL_THRESHOLD} (0.25% price move - PRECISION STRIKE)")
+print(f"  [CONFIG] New Threshold: {LABEL_THRESHOLD} (0.15% price move - more trades)")
 print("")
 print("  Rationale: 36h lookahead ignores M5 microstructure features.")
 print("             4h lookahead activates M5 hints for precise entry timing.")
 print("=" * 72)
 # ==============================================================================
 
-# The Fleet: 6 ELITE cryptocurrencies (PRECISION STRIKE MODE)
+# The Fleet: 8 high-performance cryptocurrencies
 # REMOVED: DOGEUSDT (48.20% precision - underperformer)
 # REMOVED: AVAXUSDT (44.15% precision - model misalignment)
-# REMOVED: ADAUSDT (unreliable precision at high confidence)
-# REMOVED: LTCUSDT (failed high-confidence check)
 FLEET_ASSETS = [
-    'BTCUSDT',   # Market leader - pure signal
-    'ETHUSDT',   # Strong at >0.60 threshold
-    'SOLUSDT',   # High performance
-    'BNBUSDT',   # Consistent performer
-    'XRPUSDT',   # Excellent at >0.60 threshold
-    # 'ADAUSDT',   # REMOVED: Unreliable precision
+    'BTCUSDT',
+    'ETHUSDT',
+    'SOLUSDT',
+    'BNBUSDT',
+    'XRPUSDT',
+    'ADAUSDT',
     # 'DOGEUSDT',  # REMOVED: Consistently <50% precision
     # 'AVAXUSDT',  # REMOVED: Inverse correlation with confidence
-    'LINKUSDT',  # Oracle network - stable
-    # 'LTCUSDT',   # REMOVED: Failed high-confidence check
+    'LINKUSDT',
+    'LTCUSDT',
 ]
 
 
