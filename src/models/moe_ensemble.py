@@ -495,6 +495,16 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         X_scaled = self.feature_scaler.fit_transform(numeric_df.to_numpy(dtype=float))
         y_array = np.ravel(np.asarray(y))
         
+        # Handle NaN values for Range and Stress experts (they don't accept NaN)
+        # Use median imputation to fill missing values from M5 microstructure features
+        from sklearn.impute import SimpleImputer
+        self.imputer_ = SimpleImputer(strategy='median')
+        X_scaled_imputed = self.imputer_.fit_transform(X_scaled)
+        
+        nan_count = np.isnan(X_scaled).sum()
+        if nan_count > 0:
+            print(f"  [MoE] Imputed {nan_count} NaN values for Range/Stress experts")
+        
         # Physics-Aware Sample Weighting
         trend_sample_weight = sample_weight
         if "stability_warning" in base_df.columns:
@@ -515,10 +525,10 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         self.trend_expert.fit(base_df, y_array, sample_weight=trend_sample_weight)
         
         print("  [MoE] Training Expert 2: Range (KNN)...")
-        self.range_expert.fit(X_scaled, y_array)
+        self.range_expert.fit(X_scaled_imputed, y_array)
         
         print("  [MoE] Training Expert 3: Stress (LogReg)...")
-        self.stress_expert.fit(X_scaled, y_array, sample_weight=sample_weight)
+        self.stress_expert.fit(X_scaled_imputed, y_array, sample_weight=sample_weight)
         
         # Train Stochastic Expert (LaP-SDE)
         if self._ou_enabled and self.sde_expert is not None:
@@ -751,6 +761,9 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         numeric = base_df[self.feature_columns_]
         X_scaled = self.feature_scaler.transform(numeric.to_numpy(dtype=float))
         
+        # Apply imputation for Range and Stress experts
+        X_scaled_imputed = self.imputer_.transform(X_scaled)
+        
         # Get physics features for gating
         physics_matrix = base_df.loc[:, _ensure_columns(base_df, self.physics_features)].to_numpy(dtype=float)
         
@@ -761,8 +774,8 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         
         # Get expert predictions
         p_trend = self.trend_expert.predict_proba(base_df)
-        p_range = self.range_expert.predict_proba(X_scaled)
-        p_stress = self.stress_expert.predict_proba(X_scaled)
+        p_range = self.range_expert.predict_proba(X_scaled_imputed)
+        p_stress = self.stress_expert.predict_proba(X_scaled_imputed)
         
         # Start with base 3 experts
         expert_idx = 3
