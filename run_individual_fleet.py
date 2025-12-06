@@ -627,7 +627,7 @@ def run_individual_fleet_training(
                 print(f"  Expectancy: {expectancy:.4f}")
                 
                 # Save fold visualization
-                val_timestamps = timestamp_col.iloc[val_idx]
+                val_timestamps = timestamp_col[val_idx]  # DatetimeIndex supports array indexing
                 val_close_prices = close_prices[val_idx]
                 
                 save_fold_visualization(
