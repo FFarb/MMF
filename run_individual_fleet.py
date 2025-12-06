@@ -56,6 +56,7 @@ print("=" * 72)
 from src.data_loader import MarketDataLoader
 from src.features import SignalFactory
 from src.features.tensor_flex import TensorFlexFeatureRefiner
+from src.features.micro_structure import calc_microstructure_features  # Proven M5 function
 from src.models.moe_ensemble import MixtureOfExpertsEnsemble
 from src.preprocessing.frac_diff import FractionalDifferentiator
 from src.trading.forced_entry import (
@@ -456,9 +457,14 @@ def run_individual_fleet_training(
             
             # Add M5 microstructure features if available
             if has_m5:
-                micro_features = extract_m5_microstructure_features(df_m5_raw, df_h1_features)
+                print(f"  [Microstructure] Calculating M5 hints...")
+                micro_features = calc_microstructure_features(df_m5_raw, df_h1_features.index)
+                
+                # Merge microstructure features into H1 data
                 for col in micro_features.columns:
                     df_h1_features[col] = micro_features[col]
+                
+                print(f"  [Microstructure] [OK] Added {len(micro_features.columns)} microstructure features")
             
             # Apply holdout period if specified
             if holdout_days > 0:
@@ -582,7 +588,7 @@ def run_individual_fleet_training(
                     physics_features=available_physics,
                     random_state=RANDOM_SEED,
                     use_cnn=True,
-                    use_ou=True,  # Enable SDE expert
+                    use_ou=False,  # Disable SDE expert (causing NaN issues)
                     use_asset_embedding=False,  # Single asset, no embedding needed
                     cnn_params=cnn_params,
                     cnn_epochs=15,
