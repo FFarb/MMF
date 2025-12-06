@@ -178,6 +178,8 @@ def run_individual_fleet_training(
     assets: List[str] = FLEET_ASSETS,
     n_folds: int = 5,
     history_days: int = 730,  # 2 years
+    history_hours: int = 0,  # Additional hours
+    history_minutes: int = 0,  # Additional minutes
     holdout_days: int = 0,
     max_frac_diff_d: float = 0.65,
     apply_forced_entry: bool = True,
@@ -193,6 +195,10 @@ def run_individual_fleet_training(
         Number of cross-validation folds
     history_days : int
         Days of history (default: 730 = 2 years)
+    history_hours : int
+        Additional hours of history (default: 0)
+    history_minutes : int
+        Additional minutes of history (default: 0)
     holdout_days : int
         Days to exclude from training for validation (default: 0)
     max_frac_diff_d : float
@@ -203,7 +209,7 @@ def run_individual_fleet_training(
     print("=" * 72)
     print("INDIVIDUAL FLEET TRAINING: Islands Strategy")
     print(f"Training {len(assets)} assets with ISOLATED models")
-    print(f"History: {history_days} days")
+    print(f"History: {history_days} days, {history_hours} hours, {history_minutes} minutes")
     if holdout_days > 0:
         print(f"Holdout Period: {holdout_days} days")
     print(f"Forced Daily Entry: {'ENABLED' if apply_forced_entry else 'DISABLED'}")
@@ -229,7 +235,11 @@ def run_individual_fleet_training(
             loader = MarketDataLoader(symbol=asset_symbol, interval="60")
             factory = SignalFactory()
             
-            df_raw = loader.get_data(days_back=history_days)
+            df_raw = loader.get_data(
+                days_back=history_days,
+                hours_back=history_hours,
+                minutes_back=history_minutes
+            )
             
             if df_raw is None or len(df_raw) < 1000:
                 print(f"  ⚠️  Insufficient data for {asset_symbol}, skipping...")
@@ -532,10 +542,26 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Individual Fleet Training: Islands Strategy"
+        description="Individual Fleet Training: Islands Strategy",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  # Default: 2 years, 5 folds
+  python run_individual_fleet.py
+  
+  # Custom: 1 year + 6 hours, 10 folds
+  python run_individual_fleet.py --days 365 --hours 6 --folds 10
+  
+  # Quick test: 30 days, 3 folds
+  python run_individual_fleet.py --days 30 --folds 3
+  
+  # Precise: 7 days + 12 hours + 30 minutes
+  python run_individual_fleet.py --days 7 --hours 12 --minutes 30
+"""
     )
     parser.add_argument("--folds", type=int, default=5, help="Number of CV folds")
     parser.add_argument("--days", type=int, default=730, help="Days of history")
+    parser.add_argument("--hours", type=int, default=0, help="Additional hours of history")
+    parser.add_argument("--minutes", type=int, default=0, help="Additional minutes of history")
     parser.add_argument("--holdout-days", type=int, default=0, help="Days to exclude from training")
     parser.add_argument("--max-d", type=float, default=0.65, help="Max frac diff order")
     parser.add_argument("--no-forced-entry", action="store_true", help="Disable forced daily entry policy")
