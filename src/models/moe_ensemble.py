@@ -413,7 +413,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         # Expert 3: Stress (LogReg) - Crash protection with high regularization
         self.stress_expert = LogisticRegression(
             C=0.1,  # High regularization
-            class_weight={0: 2.0, 1: 1.0},  # Bias toward caution
+            class_weight='balanced',  # Let data decide risk (removed manual bias)
             max_iter=500,
             random_state=self.random_state,
         )
@@ -709,23 +709,8 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         weights = np.clip(weights, 1e-6, None)
         weights /= weights.sum(axis=1, keepdims=True)
         
-        # Physics Override: Boost Stress Expert during critical slowing down
-        try:
-            theta_idx = list(self.physics_features).index("stability_theta")
-            theta_vals = physics_matrix[:, theta_idx]
-            
-            # Critical slowing down (theta -> 0)
-            critical_mask = theta_vals < 0.005
-            
-            if np.any(critical_mask):
-                # Boost Stress Expert (index 2)
-                boost_amount = 2.0
-                if weights.shape[1] > 2:
-                    weights[critical_mask, 2] += boost_amount
-                    weights[critical_mask] /= weights[critical_mask].sum(axis=1, keepdims=True)
-        except ValueError:
-            # stability_theta not in physics_features
-            pass
+        # REMOVED: Physics Override (was causing Stress expert overheating)
+        # Let Oracle training determine when Stress is needed via cross-entropy
         
         # If CNN disabled, ensure only 3 experts
         if not self._cnn_enabled and weights.shape[1] > 3:
