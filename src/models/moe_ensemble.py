@@ -422,17 +422,26 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         self.sde_expert: Optional[SDEExpert] = None
         self._ou_enabled = False  # Keep variable name for compatibility
         if self.use_ou:  # Keep param name for compatibility
-            self.sde_expert = SDEExpert(
-                latent_dim=64,        # Max capacity (ARD will reduce)
-                hidden_dims=[512, 256, 128],  # Deep encoder
-                lr=0.001,             # Conservative learning rate
-                epochs=100,           # Training epochs
-                beta_kl=1.0,          # ARD penalty (dimensionality control)
-                lambda_sparse=0.01,   # Physics sparsity
-                time_steps=10,        # SDE integration steps
-                random_state=self.random_state,
-            )
-            self._ou_enabled = True
+            try:
+                print("  [MoE] Initializing SDE expert (LaP-SDE)...")
+                self.sde_expert = SDEExpert(
+                    latent_dim=64,        # Max capacity (ARD will reduce)
+                    hidden_dims=[512, 256, 128],  # Deep encoder
+                    lr=0.001,             # Conservative learning rate
+                    epochs=100,           # Training epochs
+                    beta_kl=1.0,          # ARD penalty (dimensionality control)
+                    lambda_sparse=0.01,   # Physics sparsity
+                    time_steps=10,        # SDE integration steps
+                    random_state=self.random_state,
+                )
+                self._ou_enabled = True
+                print(f"  [MoE] [OK] SDE expert initialized successfully")
+            except Exception as e:
+                print(f"  [MoE] [ERROR] SDE expert initialization failed: {e}")
+                import traceback
+                traceback.print_exc()
+                self.sde_expert = None
+                self._ou_enabled = False
         
         # Gating Network (decides who speaks)
         self.gating_network = MLPClassifier(
@@ -532,14 +541,23 @@ class MixtureOfExpertsEnsemble(BaseEstimator, ClassifierMixin):
         
         # Train Stochastic Expert (LaP-SDE)
         if self._ou_enabled and self.sde_expert is not None:
-            print("  [MoE] Training Expert 4: Stochastic (LaP-SDE - Physics + Uncertainty)...")
-            self.sde_expert.fit(base_df, y_array)
-            
-            # Get telemetry
-            telemetry = self.sde_expert.get_telemetry()
-            active_dims = telemetry.get('active_dimensions', 0)
-            snr = telemetry.get('signal_to_noise', 0)
-            print(f"    [LaP-SDE] Active Dims: {active_dims}, SNR: {snr:.4f}")
+            try:
+                print("  [MoE] Training Expert 4: Stochastic (LaP-SDE - Physics + Uncertainty)...")
+                self.sde_expert.fit(base_df, y_array)
+                
+                # Get telemetry
+                telemetry = self.sde_expert.get_telemetry()
+                active_dims = telemetry.get('active_dimensions', 0)
+                snr = telemetry.get('signal_to_noise', 0)
+                print(f"    [LaP-SDE] Active Dims: {active_dims}, SNR: {snr:.4f}")
+                print(f"  [MoE] [OK] SDE expert trained successfully")
+            except Exception as e:
+                print(f"  [MoE] [ERROR] SDE expert training failed: {e}")
+                import traceback
+                traceback.print_exc()
+                # Disable SDE expert if training fails
+                self.sde_expert = None
+                self._ou_enabled = False
         
         # Train Pattern Expert (CNN)
         print("  [MoE] Training Expert 5: Pattern (CNN)...")
