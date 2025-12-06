@@ -588,7 +588,7 @@ def run_individual_fleet_training(
                     physics_features=available_physics,
                     random_state=RANDOM_SEED,
                     use_cnn=True,
-                    use_ou=False,  # Disable SDE expert (causing NaN issues)
+                    use_ou=True,  # Enable SDE expert (LaP-SDE)
                     use_asset_embedding=False,  # Single asset, no embedding needed
                     cnn_params=cnn_params,
                     cnn_epochs=15,
