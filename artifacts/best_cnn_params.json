@@ -1,0 +1,7 @@
+{
+    "dropout": 0.5,
+    "mid_channels": 64,
+    "weight_decay": 0.01,
+    "lr": 0.001,
+    "window_length": 64
+}

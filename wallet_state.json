@@ -1,0 +1,55 @@
+{
+  "balance": 10112.174333653136,
+  "positions": {},
+  "trade_history": [
+    {
+      "symbol": "SOLUSDT",
+      "side": "LONG",
+      "entry_price": 132.65,
+      "exit_price": 152.57,
+      "size_usd": 263.24832180974755,
+      "leverage": 1.0,
+      "entry_time": "2025-12-06T19:00:00",
+      "exit_time": "2025-12-07T05:11:49.478671",
+      "pnl": 39.400276106341025,
+      "exit_reason": "VOLATILITY_STOP"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "side": "LONG",
+      "entry_price": 89614.1,
+      "exit_price": 100184.9,
+      "size_usd": 346.11103054275134,
+      "leverage": 1.0,
+      "entry_time": "2025-12-06T19:00:00",
+      "exit_time": "2025-12-07T05:11:49.479035",
+      "pnl": 40.653895619218744,
+      "exit_reason": "VOLATILITY_STOP"
+    },
+    {
+      "symbol": "LTCUSDT",
+      "side": "LONG",
+      "entry_price": 81.97,
+      "exit_price": 87.26,
+      "size_usd": 262.9033529801467,
+      "leverage": 1.0,
+      "entry_time": "2025-12-06T19:00:00",
+      "exit_time": "2025-12-07T05:11:49.479377",
+      "pnl": 16.83522805103192,
+      "exit_reason": "VOLATILITY_STOP"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": "LONG",
+      "entry_price": 3040.26,
+      "exit_price": 3233.0,
+      "size_usd": 251.9567278993539,
+      "leverage": 1.0,
+      "entry_time": "2025-12-06T19:00:00",
+      "exit_time": "2025-12-07T05:11:49.479720",
+      "pnl": 15.847043593159718,
+      "exit_reason": "VOLATILITY_STOP"
+    }
+  ],
+  "last_updated": "2025-12-07T09:02:19.905375"
+}

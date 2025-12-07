@@ -1,0 +1,24 @@
+========================================================================
+GLOBAL FLEET VALIDATION REPORT
+========================================================================
+
+Assets Trained: 9
+Total Samples: 170990
+Folds: 5
+
+Overall Performance:
+  Avg Precision: 58.50%
+  Avg Recall:    7.12%
+  Avg Expectancy: 0.00755
+
+Per-Asset Performance:
+   Asset  Precision   Recall  Expectancy  Folds
+DOGEUSDT   0.718318 0.049995    0.011550      2
+LINKUSDT   0.632391 0.069195    0.008972      2
+AVAXUSDT   0.602504 0.052034    0.008075      1
+ LTCUSDT   0.598063 0.062635    0.007942      1
+ ETHUSDT   0.566038 0.112150    0.006981      1
+ SOLUSDT   0.529235 0.133174    0.005877      1
+ XRPUSDT   0.476292 0.091304    0.004289      1
+ BNBUSDT   0.453765 0.112979    0.003613      2
+ ADAUSDT   0.358537 0.009939    0.000756      2
