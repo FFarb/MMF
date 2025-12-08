@@ -64,6 +64,7 @@ from src.trading.forced_entry import (
     analyze_forced_entry_performance,
     print_forced_entry_report,
 )
+from src.telemetry.fleet_html_report import generate_individual_fleet_html
 
 # Import from run_deep_research
 from run_deep_research import (
@@ -402,6 +403,7 @@ def run_individual_fleet_training(
         print(f"\n[CNN] Loaded tuned params: {cnn_params}")
     
     all_results = []
+    asset_fold_data = {}  # For HTML report: {asset: [fold_data, ...]}
     
     for asset_symbol in assets:
         print("\n" + "=" * 72)
@@ -653,7 +655,10 @@ def run_individual_fleet_training(
                     'expectancy': expectancy,
                     'y_pred_proba': y_pred_proba,
                     'y_pred': y_pred,
+                    'y_true': y_val.values,  # For HTML charts
+                    'close_prices': val_close_prices,  # For HTML charts
                     'timestamps': val_timestamps,
+                    'threshold': threshold,  # For HTML charts
                 })
                 
                 del X_train, X_val, y_train, y_val, moe
@@ -724,6 +729,26 @@ def run_individual_fleet_training(
                 'folds': n_folds,
             })
             
+            # Store fold data for HTML report (reformat for chart generation)
+            asset_fold_data[asset_symbol] = [
+                {
+                    'fold': fd['fold'],
+                    'precision': fd['precision'],
+                    'recall': fd['recall'],
+                    'f1': fd['f1'],
+                    'accuracy': fd['accuracy'],
+                    'roc_auc': fd['roc_auc'],
+                    'expectancy': fd['expectancy'],
+                    'y_proba': fd['y_pred_proba'].tolist() if hasattr(fd['y_pred_proba'], 'tolist') else list(fd['y_pred_proba']),
+                    'y_pred': fd['y_pred'].tolist() if hasattr(fd['y_pred'], 'tolist') else list(fd['y_pred']),
+                    'y_true': fd['y_true'].tolist() if hasattr(fd['y_true'], 'tolist') else list(fd['y_true']),
+                    'close_prices': fd['close_prices'].tolist() if hasattr(fd['close_prices'], 'tolist') else list(fd['close_prices']),
+                    'timestamps': [str(t) for t in fd['timestamps']],
+                    'threshold': fd['threshold'],
+                }
+                for fd in fold_results
+            ]
+            
         except Exception as e:
             import traceback
             print(f"  [ERROR] Error processing {asset_symbol}: {e}")
@@ -764,6 +789,32 @@ def run_individual_fleet_training(
             print("   Islands Strategy: Each asset has its own specialized model!")
         else:
             print("\n[WARNING] INDIVIDUAL FLEET NEEDS TUNING")
+        
+        # Generate comprehensive HTML report
+        print("\n" + "=" * 72)
+        print("GENERATING HTML TELEMETRY REPORT")
+        print("=" * 72)
+        
+        training_params = {
+            'H1 Days': history_days_h1,
+            'M5 Days': history_days_m5,
+            'CV Folds': n_folds,
+            'Holdout Days': holdout_days,
+            'Max Frac Diff D': max_frac_diff_d,
+            'Forced Entry': apply_forced_entry,
+            'Label Lookahead': LABEL_LOOKAHEAD,
+            'Label Threshold': LABEL_THRESHOLD,
+        }
+        
+        html_path = artifacts_dir / "individual_fleet_report.html"
+        generate_individual_fleet_html(
+            all_results=all_results,
+            asset_fold_data=asset_fold_data,
+            output_path=html_path,
+            training_params=training_params,
+        )
+        
+        print(f"\n[Artifacts] HTML Report: {html_path}")
     
     return all_results
 

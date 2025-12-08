@@ -1,0 +1,40 @@
+================================================================================
+BTCUSDT - INDIVIDUAL MODEL SUMMARY REPORT
+================================================================================
+
+OVERALL PERFORMANCE:
+--------------------------------------------------------------------------------
+  Average Precision:  0.6644 ± 0.3107
+  Average Recall:     0.2504 ± 0.2116
+  Average F1 Score:   0.2890 ± 0.2415
+  Average Accuracy:   0.5696 ± 0.0660
+  Average Expectancy: 0.009932 ± 0.009322
+
+PER-FOLD BREAKDOWN:
+--------------------------------------------------------------------------------
+
+Fold 1:
+  Precision:  0.3867
+  Recall:     0.3295
+  F1 Score:   0.3558
+  Accuracy:   0.5070
+  Expectancy: 0.001600
+  ROC AUC:    0.4616
+
+Fold 2:
+  Precision:  0.6066
+  Recall:     0.4111
+  F1 Score:   0.4901
+  Accuracy:   0.6385
+  Expectancy: 0.008197
+  ROC AUC:    0.6691
+
+Fold 3:
+  Precision:  1.0000
+  Recall:     0.0106
+  F1 Score:   0.0211
+  Accuracy:   0.5634
+  Expectancy: 0.020000
+  ROC AUC:    0.5047
+
+================================================================================
