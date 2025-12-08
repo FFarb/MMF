@@ -1,0 +1,40 @@
+================================================================================
+AVAXUSDT - INDIVIDUAL MODEL SUMMARY REPORT
+================================================================================
+
+OVERALL PERFORMANCE:
+--------------------------------------------------------------------------------
+  Average Precision:  0.4266 ± 0.0542
+  Average Recall:     0.2504 ± 0.2069
+  Average F1 Score:   0.2807 ± 0.1758
+  Average Accuracy:   0.5302 ± 0.0702
+  Average Expectancy: 0.002798 ± 0.001626
+
+PER-FOLD BREAKDOWN:
+--------------------------------------------------------------------------------
+
+Fold 1:
+  Precision:  0.3846
+  Recall:     0.0500
+  F1 Score:   0.0885
+  Accuracy:   0.5209
+  Expectancy: 0.001538
+  ROC AUC:    0.4898
+
+Fold 2:
+  Precision:  0.4074
+  Recall:     0.4632
+  F1 Score:   0.4335
+  Accuracy:   0.4651
+  Expectancy: 0.002222
+  ROC AUC:    0.4955
+
+Fold 3:
+  Precision:  0.4878
+  Recall:     0.2381
+  F1 Score:   0.3200
+  Accuracy:   0.6047
+  Expectancy: 0.004634
+  ROC AUC:    0.5594
+
+================================================================================

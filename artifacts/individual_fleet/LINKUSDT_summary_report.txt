@@ -1,0 +1,40 @@
+================================================================================
+LINKUSDT - INDIVIDUAL MODEL SUMMARY REPORT
+================================================================================
+
+OVERALL PERFORMANCE:
+--------------------------------------------------------------------------------
+  Average Precision:  0.4932 ± 0.0196
+  Average Recall:     0.2734 ± 0.2366
+  Average F1 Score:   0.3017 ± 0.2316
+  Average Accuracy:   0.5336 ± 0.0271
+  Average Expectancy: 0.004796 ± 0.000587
+
+PER-FOLD BREAKDOWN:
+--------------------------------------------------------------------------------
+
+Fold 1:
+  Precision:  0.4712
+  Recall:     0.4900
+  F1 Score:   0.4804
+  Accuracy:   0.5023
+  Expectancy: 0.004135
+  ROC AUC:    0.5270
+
+Fold 2:
+  Precision:  0.5085
+  Recall:     0.3093
+  F1 Score:   0.3846
+  Accuracy:   0.5493
+  Expectancy: 0.005254
+  ROC AUC:    0.6330
+
+Fold 3:
+  Precision:  0.5000
+  Recall:     0.0208
+  F1 Score:   0.0400
+  Accuracy:   0.5493
+  Expectancy: 0.005000
+  ROC AUC:    0.5030
+
+================================================================================

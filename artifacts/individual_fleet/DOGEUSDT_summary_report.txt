@@ -1,0 +1,40 @@
+================================================================================
+DOGEUSDT - INDIVIDUAL MODEL SUMMARY REPORT
+================================================================================
+
+OVERALL PERFORMANCE:
+--------------------------------------------------------------------------------
+  Average Precision:  0.3636 ± 0.3278
+  Average Recall:     0.0814 ± 0.0997
+  Average F1 Score:   0.1295 ± 0.1513
+  Average Accuracy:   0.5674 ± 0.0486
+  Average Expectancy: 0.000909 ± 0.009833
+
+PER-FOLD BREAKDOWN:
+--------------------------------------------------------------------------------
+
+Fold 1:
+  Precision:  0.4545
+  Recall:     0.0515
+  F1 Score:   0.0926
+  Accuracy:   0.5442
+  Expectancy: 0.003636
+  ROC AUC:    0.5133
+
+Fold 2:
+  Precision:  0.6364
+  Recall:     0.1927
+  F1 Score:   0.2958
+  Accuracy:   0.5349
+  Expectancy: 0.009091
+  ROC AUC:    0.5572
+
+Fold 3:
+  Precision:  0.0000
+  Recall:     0.0000
+  F1 Score:   0.0000
+  Accuracy:   0.6233
+  Expectancy: -0.010000
+  ROC AUC:    0.5811
+
+================================================================================

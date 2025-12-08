@@ -1,0 +1,40 @@
+================================================================================
+LTCUSDT - INDIVIDUAL MODEL SUMMARY REPORT
+================================================================================
+
+OVERALL PERFORMANCE:
+--------------------------------------------------------------------------------
+  Average Precision:  0.6674 ± 0.2908
+  Average Recall:     0.2086 ± 0.1827
+  Average F1 Score:   0.2564 ± 0.2068
+  Average Accuracy:   0.5748 ± 0.0561
+  Average Expectancy: 0.010021 ± 0.008723
+
+PER-FOLD BREAKDOWN:
+--------------------------------------------------------------------------------
+
+Fold 1:
+  Precision:  0.4615
+  Recall:     0.3711
+  F1 Score:   0.4114
+  Accuracy:   0.5187
+  Expectancy: 0.003846
+  ROC AUC:    0.4878
+
+Fold 2:
+  Precision:  0.5405
+  Recall:     0.2439
+  F1 Score:   0.3361
+  Accuracy:   0.6308
+  Expectancy: 0.006216
+  ROC AUC:    0.5453
+
+Fold 3:
+  Precision:  1.0000
+  Recall:     0.0109
+  F1 Score:   0.0215
+  Accuracy:   0.5748
+  Expectancy: 0.020000
+  ROC AUC:    0.5662
+
+================================================================================

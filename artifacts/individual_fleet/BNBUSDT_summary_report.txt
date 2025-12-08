@@ -1,0 +1,40 @@
+================================================================================
+BNBUSDT - INDIVIDUAL MODEL SUMMARY REPORT
+================================================================================
+
+OVERALL PERFORMANCE:
+--------------------------------------------------------------------------------
+  Average Precision:  0.3781 ± 0.3422
+  Average Recall:     0.1154 ± 0.1825
+  Average F1 Score:   0.1412 ± 0.2113
+  Average Accuracy:   0.5530 ± 0.0184
+  Average Expectancy: 0.001344 ± 0.010267
+
+PER-FOLD BREAKDOWN:
+--------------------------------------------------------------------------------
+
+Fold 1:
+  Precision:  0.6667
+  Recall:     0.0204
+  F1 Score:   0.0396
+  Accuracy:   0.5530
+  Expectancy: 0.010000
+  ROC AUC:    0.5045
+
+Fold 2:
+  Precision:  0.4677
+  Recall:     0.3258
+  F1 Score:   0.3841
+  Accuracy:   0.5714
+  Expectancy: 0.004032
+  ROC AUC:    0.5420
+
+Fold 3:
+  Precision:  0.0000
+  Recall:     0.0000
+  F1 Score:   0.0000
+  Accuracy:   0.5346
+  Expectancy: -0.010000
+  ROC AUC:    0.5534
+
+================================================================================

@@ -148,3 +148,122 @@ THRESHOLD_GRID = (0.20, 0.70, 0.02) # start, end, step
 
 # --- Visualization -----------------------------------------------------------
 PLOT_TEMPLATE = "plotly_dark"
+
+# --- Diffusion Denoiser Configuration ----------------------------------------
+DIFFUSION_DENOISER = {
+    'enabled': False,                    # Global on/off (start disabled to establish baseline)
+    'target': 'frac_diff',               # 'frac_diff', 'log_returns', or 'full_features'
+    'seq_len': 128,                      # Sequence length for model (128 H1 bars ≈ 5 days)
+    'beta_schedule': 'cosine',           # 'linear', 'cosine', or 'quadratic'
+    'num_timesteps': 1000,               # Training diffusion steps
+    'inference_steps': 20,               # Reduced steps for fast inference
+    'model_channels': 64,                # Base model dimension
+    'num_res_blocks': 2,                 # Residual blocks per level
+    'channel_mult': (1, 2, 4),           # Channel multipliers
+    'time_dim': 128,                     # Time embedding dimension
+    'dropout': 0.1,                      # Dropout rate
+    'noise_level': 0.3,                  # Noise level for denoising (0-1)
+    'checkpoint_path': 'artifacts/diffusion_denoiser/latest.ckpt',
+    'artifacts_dir': Path('artifacts/diffusion_denoiser'),
+}
+
+# --- Diffusion Scenario Engine Configuration ---------------------------------
+DIFFUSION_SCENARIO = {
+    'enabled': False,                    # Start disabled
+    'L_past': 96,                        # Past window length (conditioning)
+    'H_future': 12,                      # Forecast horizon (12 H1 bars = 12 hours)
+    'C_target': 1,                       # Target channels (1 = returns only)
+    'beta_schedule': 'cosine',
+    'num_timesteps': 1000,
+    'inference_steps': 50,               # More steps for quality scenarios
+    'model_channels': 64,
+    'cond_dim': 128,                     # Conditioning embedding dimension
+    'checkpoint_path': 'artifacts/diffusion_scenario/latest.ckpt',
+    'artifacts_dir': Path('artifacts/diffusion_scenario'),
+}
+
+# --- Diffusion Expert (6th MoE Expert) Configuration ------------------------
+DIFFUSION_EXPERT = {
+    'enabled': False,                    # Add as 6th expert when True
+    'num_scenarios': 32,                 # K scenarios per prediction
+    'horizon': 12,                       # Forecast horizon in bars
+    'use_calibration_head': True,        # Calibrate scenario-based P_up
+    'calibration_hidden_dim': 32,        # Calibration MLP hidden size
+    'use_denoised_features': False,      # Use denoised features as input
+    'tail_risk_quantile': 0.05,          # For computing tail risk (5th percentile)
+}
+
+# --- Dual-Manifold Fusion Configuration --------------------------------------
+DUAL_MANIFOLD = {
+    'enabled': False,                    # Optional advanced gating
+    'd_model': 64,                       # Embedding dimension
+    'market_encoder': {
+        'use_diffusion_denoiser': True,  # Use denoised features
+        'use_sde': True,                 # Include LaP-SDE latents
+        'use_tensor_flex': True,         # Include Tensor-Flex latents
+        'num_layers': 1,                 # Self-attention layers
+        'num_heads': 4,
+        'use_gqa': False,                # Grouped-Query Attention
+    },
+    'cog_encoder': {
+        'use_risk_token': True,          # Include risk engine state
+        'use_meta_token': True,          # Include regime/meta state
+        'num_layers': 1,
+        'num_heads': 4,
+        'use_gqa': False,
+    },
+    'fusion': {
+        'num_layers': 2,                 # Cross-attention layers
+        'num_heads': 4,
+        'use_gqa': True,
+        'num_kv_groups': 2,              # KV groups for GQA
+        'dropout': 0.1,
+    },
+}
+
+# --- MoE Gating Configuration ------------------------------------------------
+MOE = {
+    'gating_mode': 'classic',            # 'classic' or 'dual_manifold'
+    'temperature': 1.0,                  # Softmax temperature
+    'num_experts': 5,                    # 5 base experts (6 with Diffusion)
+}
+
+# --- Tuning & Production Configuration ---------------------------------------
+TUNING = {
+    'MODE': 'research',                  # 'research' or 'production'
+    'METRICS_TARGETS': {
+        'target_sharpe': 1.5,
+        'max_allowed_drawdown': 0.25,
+        'min_hit_rate': 0.45,
+        'max_trades_per_day': 50,
+        'max_leverage': 5.0,
+        'max_position_duration_minutes': 1440,
+    },
+    'BACKTEST': {
+        'transaction_costs': {
+            'taker_fee_bps': 7,
+            'maker_fee_bps': 2,
+        },
+        'slippage_model': 'fixed_bps',   # or 'volume_based'
+        'slippage_bps': 3,
+        'include_funding_fees': True,
+    },
+    'SAFETY': {
+        'daily_loss_limit': 0.05,        # 5% daily loss triggers kill-switch
+        'weekly_loss_limit': 0.10,       # 10% weekly loss
+        'max_drawdown_since_start': 0.20,# 20% total drawdown
+        'min_margin_buffer': 0.30,       # 30% margin buffer
+    },
+    'SWEEP': {
+        'parameters_to_optimize': [
+            'risk_engine.target_vol',
+            'risk_engine.max_lev',
+            'moe.temperature',
+            'diffusion_denoiser.enabled',
+            'diffusion_expert.enabled',
+            'diffusion_expert.num_scenarios',
+        ],
+        'max_runs_per_asset': 50,
+    },
+}
+

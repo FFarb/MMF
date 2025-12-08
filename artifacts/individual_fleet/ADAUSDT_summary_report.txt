@@ -1,0 +1,40 @@
+================================================================================
+ADAUSDT - INDIVIDUAL MODEL SUMMARY REPORT
+================================================================================
+
+OVERALL PERFORMANCE:
+--------------------------------------------------------------------------------
+  Average Precision:  0.5515 ± 0.1721
+  Average Recall:     0.3045 ± 0.3991
+  Average F1 Score:   0.2784 ± 0.2566
+  Average Accuracy:   0.5352 ± 0.0645
+  Average Expectancy: 0.006546 ± 0.005162
+
+PER-FOLD BREAKDOWN:
+--------------------------------------------------------------------------------
+
+Fold 1:
+  Precision:  0.4601
+  Recall:     0.7653
+  F1 Score:   0.5747
+  Accuracy:   0.4789
+  Expectancy: 0.003804
+  ROC AUC:    0.5398
+
+Fold 2:
+  Precision:  0.7500
+  Recall:     0.0682
+  F1 Score:   0.1250
+  Accuracy:   0.6056
+  Expectancy: 0.012500
+  ROC AUC:    0.6063
+
+Fold 3:
+  Precision:  0.4444
+  Recall:     0.0800
+  F1 Score:   0.1356
+  Accuracy:   0.5211
+  Expectancy: 0.003333
+  ROC AUC:    0.5268
+
+================================================================================

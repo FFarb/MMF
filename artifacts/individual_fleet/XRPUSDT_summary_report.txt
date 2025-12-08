@@ -1,0 +1,40 @@
+================================================================================
+XRPUSDT - INDIVIDUAL MODEL SUMMARY REPORT
+================================================================================
+
+OVERALL PERFORMANCE:
+--------------------------------------------------------------------------------
+  Average Precision:  0.3226 ± 0.2966
+  Average Recall:     0.0716 ± 0.0746
+  Average F1 Score:   0.1165 ± 0.1187
+  Average Accuracy:   0.5618 ± 0.0763
+  Average Expectancy: -0.000321 ± 0.008897
+
+PER-FOLD BREAKDOWN:
+--------------------------------------------------------------------------------
+
+Fold 1:
+  Precision:  0.5833
+  Recall:     0.1489
+  F1 Score:   0.2373
+  Accuracy:   0.5775
+  Expectancy: 0.007500
+  ROC AUC:    0.6256
+
+Fold 2:
+  Precision:  0.0000
+  Recall:     0.0000
+  F1 Score:   0.0000
+  Accuracy:   0.4789
+  Expectancy: -0.010000
+  ROC AUC:    0.4948
+
+Fold 3:
+  Precision:  0.3846
+  Recall:     0.0658
+  F1 Score:   0.1124
+  Accuracy:   0.6291
+  Expectancy: 0.001538
+  ROC AUC:    0.4393
+
+================================================================================
