@@ -1,0 +1,5 @@
+{
+  "model": "diffusion_expert",
+  "num_scenarios": 32,
+  "horizon": 12
+}

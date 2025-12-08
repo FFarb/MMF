@@ -1,0 +1,24 @@
+[
+  {
+    "id": "exp_20251208_123442_8dd835",
+    "timestamp": "2025-12-08T12:34:42.888904",
+    "config_hash": "8dd835c74990",
+    "config": {
+      "model": "diffusion_expert",
+      "num_scenarios": 32,
+      "horizon": 12
+    },
+    "description": "Test experiment",
+    "tags": [
+      "test"
+    ],
+    "status": "completed",
+    "metrics": {
+      "sharpe": 1.5,
+      "max_drawdown": 0.15,
+      "hit_rate": 0.52
+    },
+    "artifacts_dir": "artifacts\\experiments\\exp_20251208_123442_8dd835",
+    "end_timestamp": "2025-12-08T12:34:42.890822"
+  }
+]
