@@ -11,6 +11,8 @@ This module implements:
 from .unet_1d import UNet1D, ResidualBlock, SinusoidalPositionalEncoding
 from .diffusion_scheduler import DiffusionScheduler
 from .time_series_diffusion import DiffusionDenoiserModel
+from .diffusion_scenario import DiffusionScenarioModel
+from .scenario_generator import ScenarioGenerator, ScenarioOracle
 
 __all__ = [
     'UNet1D',
@@ -18,4 +20,7 @@ __all__ = [
     'SinusoidalPositionalEncoding',
     'DiffusionScheduler',
     'DiffusionDenoiserModel',
+    'DiffusionScenarioModel',
+    'ScenarioGenerator',
+    'ScenarioOracle',
 ]
